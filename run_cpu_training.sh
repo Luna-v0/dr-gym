@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE_TAG="${IMAGE_TAG:-my-deepracer-project:cpu}"
+WORLD_NAME="${WORLD_NAME:-reinvent_base}"
+ENABLE_GUI="${ENABLE_GUI:-False}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$(pwd)/artifacts}"
+RUN_NAME="${RUN_NAME:-deepracer_cpu_$(date -u +%Y%m%d_%H%M%S)}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-500000}"
+CHECKPOINT_FREQ="${CHECKPOINT_FREQ:-1000}"
+SB3_DEVICE="${SB3_DEVICE:-cpu}"
+RESUME_FROM="${RESUME_FROM:-}"
+RTF_OVERRIDE="${RTF_OVERRIDE:-}"
+MAX_TRAIN_SECONDS="${MAX_TRAIN_SECONDS:-}"
+STATUS_UPDATE_STEPS="${STATUS_UPDATE_STEPS:-1000}"
+STATUS_UPDATE_SECONDS="${STATUS_UPDATE_SECONDS:-30}"
+N_STEPS="${N_STEPS:-256}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
+LEARNING_RATE="${LEARNING_RATE:-3e-4}"
+ENT_COEF="${ENT_COEF:-0.01}"
+
+mkdir -p "${ARTIFACTS_DIR}"
+
+docker_args=(
+  docker run --rm
+  -e WORLD_NAME="${WORLD_NAME}" \
+  -e ENABLE_GUI="${ENABLE_GUI}" \
+  -e RUN_NAME="${RUN_NAME}" \
+  -e TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS}" \
+  -e CHECKPOINT_FREQ="${CHECKPOINT_FREQ}" \
+  -e SB3_DEVICE="${SB3_DEVICE}" \
+  -e RESUME_FROM="${RESUME_FROM}" \
+  -e STATUS_UPDATE_STEPS="${STATUS_UPDATE_STEPS}" \
+  -e STATUS_UPDATE_SECONDS="${STATUS_UPDATE_SECONDS}" \
+  -e N_STEPS="${N_STEPS}" \
+  -e BATCH_SIZE="${BATCH_SIZE}" \
+  -e LEARNING_RATE="${LEARNING_RATE}" \
+  -e ENT_COEF="${ENT_COEF}" \
+  -v "${ARTIFACTS_DIR}:/workspace/artifacts"
+)
+
+if [[ -n "${RTF_OVERRIDE}" ]]; then
+  docker_args+=(-e RTF_OVERRIDE="${RTF_OVERRIDE}")
+fi
+
+if [[ -n "${MAX_TRAIN_SECONDS}" ]]; then
+  docker_args+=(-e MAX_TRAIN_SECONDS="${MAX_TRAIN_SECONDS}")
+fi
+
+docker_args+=("${IMAGE_TAG}")
+
+"${docker_args[@]}"
