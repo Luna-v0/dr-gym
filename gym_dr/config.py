@@ -30,24 +30,78 @@ class TrainingConfig:
 
     A *chunk* is one ``model.learn`` call: one container, one ``WORLD_NAME``.
     Multi-world runs string several chunks together — see ``WorldsConfig``.
+
+    Fields
+    ------
+    - ``total_timesteps``  — how long a single chunk trains for.
+    - ``checkpoint_freq``  — how often to drop a checkpoint into ``checkpoints/``.
+    - ``max_train_seconds`` — wall-clock cap for the chunk.
+    - ``status_update_steps`` / ``status_update_seconds`` — debounce knobs for
+      ``training_status.json`` writes.
+    - ``resume_from``      — checkpoint zip to resume from.
+    - ``rtf_override``     — Gazebo real-time-factor hint.
+    - ``eval_freq``        — how often the eval callback rolls out the policy.
+    - ``n_eval_episodes``  — episodes per eval.
     """
 
     total_timesteps: int = 500_000
+    """Number of environment timesteps for this chunk. The multi-world host
+    orchestrator overrides this per chunk to ``WorldsConfig.chunk_steps``."""
+
     checkpoint_freq: int = 1_000
+    """Save a periodic checkpoint every N timesteps to
+    ``artifacts/<chunk>/checkpoints/<prefix>_<step>_steps.zip``. Each
+    checkpoint gets a sibling ``.model_metadata.json`` so any one of them is
+    shippable to the physical car as-is."""
+
     max_train_seconds: int | None = None
+    """Optional wall-clock limit. When reached, the chunk saves a final model
+    and exits with status ``time_limit_reached``. ``None`` = no cap (train
+    until ``total_timesteps``)."""
+
     status_update_steps: int = 1_000
+    """Minimum number of timesteps between consecutive ``training_status.json``
+    rewrites. Lower = more frequent writes (mild I/O cost)."""
+
     status_update_seconds: int = 30
+    """Minimum wall-clock seconds between ``training_status.json`` rewrites.
+    Combined with ``status_update_steps`` via OR (whichever triggers first)."""
+
     resume_from: str | None = None
+    """**Container path** to a previously-saved checkpoint zip. The next
+    chunk in a multi-world rotation gets this set automatically to the
+    previous chunk's ``latest_model.zip``. Set explicitly to resume a brand-
+    new training from a previous one."""
+
     rtf_override: int | None = None
+    """Requested Gazebo real-time factor. Passed through as the
+    ``RTF_OVERRIDE`` env var; the simapp treats it as a hint and may ignore
+    high values. Typical: ``100``."""
+
     eval_freq: int = 5_000
+    """Run the eval callback every N timesteps. Each eval calls
+    ``ctx.report_eval`` which (a) logs to MLflow and (b) reports to Optuna
+    for pruning if this is an HPO trial."""
+
     n_eval_episodes: int = 3
+    """Episodes per eval rollout. Higher = lower-variance eval reward at the
+    cost of wall-clock during eval."""
 
 
 @dataclass(frozen=True)
 class TrackingConfig:
     """MLflow + TensorBoard settings.
 
-    The default ``mlflow_tracking_uri`` is a **relative** file URI so it
+    Fields
+    ------
+    - ``mlflow_tracking_uri`` — where MLflow stores runs.
+    - ``mlflow_experiment``   — MLflow experiment name (groups runs in the UI).
+    - ``tensorboard``         — enable per-run TB event writing.
+    - ``tags``                — extra tags applied to every MLflow run.
+    """
+
+    mlflow_tracking_uri: str = "file:./mlruns"
+    """MLflow store URI. The default is a **relative** file URI so it
     resolves consistently on both sides of the host/container boundary:
 
     - On the host, ``python app.py`` runs from the project dir; ``./mlruns``
@@ -56,13 +110,21 @@ class TrackingConfig:
       so ``./mlruns`` resolves to ``/workspace/mlruns`` — the same dir, via
       the ``-v <project_dir>/mlruns:/workspace/mlruns`` bind mount.
 
-    Override this only if you want a remote MLflow server.
-    """
+    Override only if you want a remote MLflow server (e.g.
+    ``http://mlflow.internal:5000``)."""
 
-    mlflow_tracking_uri: str = "file:./mlruns"
     mlflow_experiment: str = "gym-dr"
+    """MLflow experiment name. All chunks of a multi-world run + all HPO
+    trials of a study share this experiment; use one experiment per
+    project area to keep the UI tidy."""
+
     tensorboard: bool = True
+    """When ``True``, SB3 writes per-run TB events under
+    ``artifacts/<chunk>/tensorboard/``."""
+
     tags: dict[str, str] = field(default_factory=dict)
+    """Free-form key/value tags applied to every MLflow run. Useful for
+    grouping runs from the same campaign in the UI."""
 
 
 @dataclass(frozen=True)
@@ -94,8 +156,18 @@ class WorldsConfig:
     """
 
     names: list[str] = field(default_factory=lambda: ["reinvent_base"])
+    """Ordered list of world names. A single-element list = single-world
+    training. The list order is the rotation order within each pass."""
+
     chunk_steps: int = 50_000
+    """Timesteps to train per ``(rotation, world)`` chunk. Each chunk runs
+    in its own Docker container and resumes from the previous chunk's
+    ``latest_model.zip``."""
+
     rotations: int = 1
+    """How many full passes through ``names``. With ``rotations=1`` and a
+    list of 3 worlds, 3 chunks run total (3 × 1 = 3). With ``rotations=2``
+    and 3 worlds, 6 chunks (3 × 2)."""
 
 
 def _default_env_factory():
@@ -142,13 +214,40 @@ class ExperimentConfig:
     """
 
     name: str
+    """Identifier for this experiment. Per-chunk artifact dirs are
+    ``artifacts/<name>_rot<r>_<world>/``; MLflow runs use ``<name>`` as the
+    parent run name."""
+
     env_factory: Callable[["ExperimentConfig"], Any] = field(default_factory=_default_env_factory)
+    """Callable ``(experiment) -> gym.Env``. Default: ``gym_dr.envs.time_trial``.
+    Replace to plug in a different race type or env version."""
+
     trainer: "Trainer" = field(default_factory=_default_trainer)
+    """Any object with ``fit(env, ctx) -> TrainResult``. Default:
+    ``gym_dr.trainers.Sb3Trainer()`` (SB3 PPO; switch to SAC/TD3/A2C/DDPG via
+    ``Sb3Trainer(name="sac", ...)``)."""
+
     reward: Callable[[dict], float] = field(default_factory=_default_reward)
+    """``(params: dict) -> float`` — the reward function. ``params`` is the
+    upstream DeepRacer reward-params dict (``track_width``,
+    ``distance_from_center``, ``progress``, ``speed``, ``all_wheels_on_track``,
+    ``waypoints``, ...). See ``gym_dr/rewards.py`` for examples."""
+
     action_space: ActionSpaceConfig = field(default_factory=ContinuousActionSpaceConfig)
+    """Continuous bounds (steering and speed ranges) or a discrete action
+    list. Controls both the env's gym action space and what gets written to
+    ``model_metadata.json`` (the DeepRacer-compatible sidecar)."""
+
     worlds: WorldsConfig = field(default_factory=WorldsConfig)
+    """List of worlds to rotate through. Single-world runs use a list of one
+    (the default: ``["reinvent_base"]``)."""
+
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    """Per-chunk training control: timesteps, eval/checkpoint frequencies,
+    wall-clock cap, resume target. See ``TrainingConfig`` for each field."""
+
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    """MLflow + TensorBoard settings."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON dump / MLflow logging.

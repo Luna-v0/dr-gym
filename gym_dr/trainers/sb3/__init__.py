@@ -24,10 +24,44 @@ from gym_dr.trainers.sb3.callbacks import (
 
 @dataclass(frozen=True)
 class Sb3Trainer:
+    """Stable-Baselines3 trainer — the default ``Trainer`` implementation.
+
+    Builds an SB3 model via the algorithm registry, wires per-chunk callbacks
+    (status JSON, wall-clock limit, MLflow scalar mirroring, periodic
+    checkpoint with metadata sidecar, eval-based MLflow logging + Optuna
+    pruning), and calls ``model.learn``.
+
+    Fields
+    ------
+    - ``name``    — algorithm key (``"ppo"``, ``"sac"``, ``"td3"``, ``"a2c"``,
+      ``"ddpg"``).
+    - ``policy``  — SB3 policy class name (string).
+    - ``kwargs``  — algorithm hyperparameters; passed straight to the SB3
+      algorithm constructor.
+    - ``device``  — ``"cpu"`` or ``"cuda"`` (or ``"auto"``).
+    """
+
     name: str = "ppo"
+    """Which SB3 algorithm to instantiate. One of: ``ppo``, ``sac``, ``td3``,
+    ``a2c``, ``ddpg``. PPO is the only one that works out-of-the-box with
+    image-dict observations at the default ``buffer_size``; off-policy
+    algorithms require an explicit small ``kwargs["buffer_size"]`` (e.g.
+    ``50_000``) or they OOM on the camera obs."""
+
     policy: str = "MultiInputPolicy"
+    """SB3 policy class. ``MultiInputPolicy`` is required for DeepRacer's
+    dict observation space. ``CnnPolicy`` works for a single Box obs;
+    ``MlpPolicy`` for flat vectors (not the DeepRacer default)."""
+
     kwargs: dict[str, Any] = field(default_factory=dict)
+    """Algorithm-specific hyperparameters. For PPO common keys are
+    ``learning_rate``, ``n_steps``, ``batch_size``, ``ent_coef``, ``gamma``,
+    ``gae_lambda``, ``clip_range``, ``n_epochs``, ``vf_coef``. HPO sweeps
+    these via dotted overrides like ``trainer.kwargs.learning_rate``."""
+
     device: str = "cpu"
+    """Torch device. ``"cpu"`` is the default for the simapp's CPU image.
+    ``"cuda"`` requires the GPU base image (``bootstrap.sh -a gpu``)."""
 
     def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
         from stable_baselines3.common.callbacks import CallbackList
