@@ -143,7 +143,7 @@ docker build \
 
 step "Sanity-checking ${PROJECT_IMAGE}"
 SANITY_OUT="$(docker run --rm --entrypoint python3 "${PROJECT_IMAGE}" \
-  -c "import yaml, stable_baselines3 as sb3; print('OK sb3', sb3.__version__, 'yaml', yaml.__version__)" 2>&1)" || {
+  -c "import stable_baselines3 as sb3, mlflow, optuna; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__)" 2>&1)" || {
   echo "${SANITY_OUT}" >&2
   fail "Project image built but failed the import sanity check. Inspect the output above."
 }
@@ -153,10 +153,14 @@ echo "Image OK: ${SANITY_OUT}"
 
 step "Done"
 cat <<MSG
-Ready. Launch training with:
+Ready.
 
-  ./run_cpu_training.sh configs/quick.yaml
+Single training run — edit app.py, then:
 
-Available configs:
-$(ls "${PROJECT_DIR}/configs"/*.yaml 2>/dev/null | sed "s|${PROJECT_DIR}/|  |")
+  ./run_cpu_training.sh                        # uses ./app.py
+  ./run_cpu_training.sh path/to/other_app.py   # or an explicit path
+
+HPO with parallel containers (same script in host and worker mode):
+
+  uv run python experiments/hpo_example.py
 MSG

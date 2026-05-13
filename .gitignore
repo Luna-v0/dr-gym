@@ -2,6 +2,12 @@ __pycache__/
 *.py[cod]
 
 artifacts/
+mlruns/
+optuna.db
+optuna.db-journal
+model_metadata.json
+uv.lock
+*.egg-info/
 
 .venv/
 venv/
