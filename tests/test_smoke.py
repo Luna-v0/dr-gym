@@ -235,26 +235,30 @@ def test_app_py_search_space_applies_to_base():
     assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 
-def test_cuda_without_runtime_raises_clear_error(container_mode):
-    """Sb3Trainer(device='cuda') must fail fast with a useful message when
-    CUDA isn't actually available (most common dev-env crash mode)."""
+def test_cuda_without_runtime_falls_back_to_cpu(container_mode, capfd):
+    """device='cuda' on a host without CUDA should warn and train on CPU,
+    not fail the trial (which would kill an HPO study)."""
     import pytest
 
     tmp_path = container_mode
-    exp = _experiment("cuda_check", tmp_path).with_overrides(
-        **{"trainer.device": "cuda"}
-    )
     try:
         import torch
         if torch.cuda.is_available():
             pytest.skip("CUDA actually available — test only covers the missing-runtime path")
     except ImportError:
         pass
-    with pytest.raises(RuntimeError) as exc_info:
-        train(exp)
-    msg = str(exc_info.value)
-    assert "cuda" in msg.lower()
-    assert "use_gpu" in msg or "bootstrap" in msg
+
+    exp = _experiment("cuda_fallback", tmp_path).with_overrides(
+        **{"trainer.device": "cuda"}
+    )
+    result = train(exp)
+    assert isinstance(result, float), "training should complete on CPU fallback"
+
+    out = capfd.readouterr().out
+    assert "WARNING" in out and "cuda" in out.lower()
+    assert "Falling back to CPU" in out
+    # Standard artifacts still landed
+    assert (tmp_path / "artifacts" / "cuda_fallback" / "final_model.zip").exists()
 
 
 def test_seed_lands_on_sb3_model(container_mode, monkeypatch):

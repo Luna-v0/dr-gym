@@ -81,28 +81,32 @@ class Sb3Trainer:
             VecFrameStack,
         )
 
-        # Fail fast on common GPU misconfig: if cuda was requested but torch
-        # can't see a CUDA runtime, the error mid-rollout is cryptic ("invalid
-        # device ordinal", segfault in cuInit, etc.). Catch it here.
-        if self.device.lower().startswith("cuda"):
+        # GPU misconfig handling. If cuda was requested but torch can't see a
+        # CUDA runtime, fall back to CPU with a loud warning rather than
+        # failing every HPO trial — failing-fast killed entire studies when
+        # users forgot to rebuild with `./bootstrap.sh -a gpu`. The trial
+        # still runs (just slower); the WARNING in stdout tells the user to
+        # rebuild if they care about GPU speed.
+        device = self.device
+        if device.lower().startswith("cuda"):
             try:
                 import torch
 
-                if not torch.cuda.is_available():
-                    raise RuntimeError(
-                        "Sb3Trainer(device='cuda') was requested but "
-                        "torch.cuda.is_available() is False. Likely causes: "
-                        "(a) the container image was built without CUDA — "
-                        "rebuild via `./bootstrap.sh -a gpu`; "
-                        "(b) ExperimentConfig.use_gpu=False so docker run "
-                        "didn't get `--gpus all` — set use_gpu=True; "
-                        "(c) host lacks the NVIDIA Container Toolkit. "
-                        "Set device='cpu' if you don't need GPU."
-                    )
+                cuda_ok = torch.cuda.is_available()
             except ImportError:
-                raise RuntimeError(
-                    "Sb3Trainer(device='cuda') requested but torch is not installed."
+                cuda_ok = False
+            if not cuda_ok:
+                print(
+                    "[Sb3Trainer] WARNING: device='cuda' requested but "
+                    "torch.cuda.is_available() is False. Falling back to CPU "
+                    "for this trial.\n"
+                    "  To actually use GPU: (a) rebuild the image with "
+                    "`./bootstrap.sh -a gpu`; (b) set ExperimentConfig.use_gpu=True "
+                    "so `docker run` gets `--gpus all`; (c) ensure the host has "
+                    "the NVIDIA Container Toolkit installed.",
+                    flush=True,
                 )
+                device = "cpu"
 
         run_dir = ctx.run_dir
         tensorboard_dir = run_dir / "tensorboard"
@@ -136,7 +140,7 @@ class Sb3Trainer:
                 ctx.training.resume_from,
                 env,
                 name=self.name,
-                device=self.device,
+                device=device,
                 tensorboard_log=str(tensorboard_dir),
             )
         else:
@@ -145,7 +149,7 @@ class Sb3Trainer:
                 name=self.name,
                 policy=self.policy,
                 kwargs=sb3_kwargs,
-                device=self.device,
+                device=device,
                 tensorboard_log=str(tensorboard_dir),
             )
 
