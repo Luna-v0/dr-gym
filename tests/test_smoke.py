@@ -235,6 +235,56 @@ def test_app_py_search_space_applies_to_base():
     assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 
+def test_device_gpu_alias_falls_back_too(container_mode, capfd):
+    """device='gpu' is a common typo; it should normalize to cuda and then
+    take the same fall-back path when cuda isn't available."""
+    import pytest
+
+    tmp_path = container_mode
+    try:
+        import torch
+        if torch.cuda.is_available():
+            pytest.skip("CUDA actually available — test only covers the missing-runtime path")
+    except ImportError:
+        pass
+
+    exp = _experiment("gpu_alias", tmp_path).with_overrides(
+        **{"trainer.device": "gpu"}
+    )
+    result = train(exp)
+    assert isinstance(result, float), "training should complete on CPU fallback"
+
+    out = capfd.readouterr().out
+    assert "WARNING" in out and "cuda" in out.lower()
+
+
+def test_pruned_trial_status_is_pruned_not_failed(container_mode):
+    """When the inner trainer raises optuna.TrialPruned, the run dir's
+    training_status.json should say 'pruned', not 'failed'."""
+    import json
+
+    import optuna
+    import pytest
+
+    tmp_path = container_mode
+
+    class _PruningTrainer:
+        """Raises TrialPruned mid-fit to simulate Optuna's pruner kicking in."""
+
+        def fit(self, env, ctx):
+            raise optuna.TrialPruned()
+
+    exp = _experiment("prune_check", tmp_path).with_overrides(trainer=_PruningTrainer())
+    with pytest.raises(optuna.TrialPruned):
+        train(exp)
+
+    status = json.loads(
+        (tmp_path / "artifacts" / "prune_check" / "training_status.json").read_text()
+    )
+    assert status["status"] == "pruned", status
+    assert "TrialPruned" in status["reason"]
+
+
 def test_cuda_without_runtime_falls_back_to_cpu(container_mode, capfd):
     """device='cuda' on a host without CUDA should warn and train on CPU,
     not fail the trial (which would kill an HPO study)."""

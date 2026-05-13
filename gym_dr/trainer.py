@@ -182,7 +182,19 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
             _update_status(run_dir, "interrupted", {"reason": str(exc)})
             raise
         except Exception as exc:
-            _update_status(run_dir, "failed", {"reason": repr(exc)})
+            # Optuna's MedianPruner raises TrialPruned to abort
+            # underperforming trials early — that's the pruner working as
+            # designed, not a real failure. Tag it accordingly so it doesn't
+            # blend in with crashes in the artifact dir.
+            status = "failed"
+            try:
+                import optuna
+
+                if isinstance(exc, optuna.TrialPruned):
+                    status = "pruned"
+            except ImportError:
+                pass
+            _update_status(run_dir, status, {"reason": repr(exc)})
             raise
         finally:
             try:

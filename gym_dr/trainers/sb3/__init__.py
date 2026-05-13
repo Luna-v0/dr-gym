@@ -88,6 +88,10 @@ class Sb3Trainer:
         # still runs (just slower); the WARNING in stdout tells the user to
         # rebuild if they care about GPU speed.
         device = self.device
+        # Normalize "gpu" → "cuda". torch's device parser rejects "gpu" with
+        # a verbose error listing every backend; users reasonably type "gpu".
+        if device.lower() == "gpu":
+            device = "cuda"
         if device.lower().startswith("cuda"):
             try:
                 import torch
