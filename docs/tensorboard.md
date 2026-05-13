@@ -1,199 +1,70 @@
-# TensorBoard Tutorial
+# TensorBoard
 
-Date: 2026-04-08
-
-## What is already wired in this repo
-
-The training script already writes TensorBoard logs to a per-run directory:
-
-- `artifacts/<RUN_NAME>/tensorboard/`
-
-The relevant code is in:
-
-- [train.py](/mnt/hd/Repos/gym-dr/train.py)
-
-The project now also includes:
-
-- `tensorboard` in [requirements.txt](/mnt/hd/Repos/gym-dr/requirements.txt)
-- a helper script: [run_tensorboard.sh](/mnt/hd/Repos/gym-dr/run_tensorboard.sh)
-
-## Important caveat
-
-TensorBoard event files are only created if the training container was started from an image that already has `tensorboard` installed.
-
-That means:
-
-- older runs started before the image rebuild will **not** have TensorBoard event files
-- new runs started after rebuilding the image will have them
-
-In particular, if a run started while the training script printed:
-
-- `tensorboard is not installed; disabling tensorboard logging`
-
-then that run will not contain TensorBoard event data.
-
-## Step 1: rebuild the image
-
-From the project root:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
-docker build -t my-deepracer-project:cpu .
-```
-
-After this rebuild, new training runs should write TensorBoard event files.
-
-## Step 2: start a training run
-
-Example:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
-RUN_NAME=tb_test \
-TOTAL_TIMESTEPS=500000 \
-MAX_TRAIN_SECONDS=3600 \
-RTF_OVERRIDE=100 \
-./run_cpu_training.sh
-```
-
-This creates a run directory like:
+`Sb3Trainer` writes TensorBoard event files automatically on every training chunk, under:
 
 ```text
-artifacts/tb_test/
+artifacts/<chunk_name>/tensorboard/
 ```
 
-and the TensorBoard logs should appear under:
+`<chunk_name>` is `<experiment.name>_rot<r>_<world>` — e.g. `quick_test_rot0_reinvent_base`. The toggle is `TrackingConfig.tensorboard` (default `True`).
 
-```text
-artifacts/tb_test/tensorboard/
-```
+## View runs
 
-## Step 3: launch TensorBoard
-
-### Option A: view one specific run
+The helper script runs TensorBoard **on the host** (the simapp container ships an old TB 2.14 that's incompatible with modern protobuf — a recent uv-installed TB sidesteps the issue):
 
 ```bash
-cd /mnt/hd/Repos/gym-dr
-RUN_NAME=tb_test ./run_tensorboard.sh
-```
-
-Then open:
-
-```text
-http://localhost:6006
-```
-
-### Option B: view all runs together
-
-```bash
-cd /mnt/hd/Repos/gym-dr
+# All chunks under ./artifacts/ — useful for comparing runs side by side
 ./run_tensorboard.sh
+
+# One specific chunk
+./run_tensorboard.sh quick_test_rot0_reinvent_base
+
+# Different port (if 6006 is taken)
+PORT=6007 ./run_tensorboard.sh
 ```
 
-This serves the entire `artifacts/` directory, so multiple runs can appear in the same TensorBoard instance.
+Then open <http://localhost:6006>.
 
-## Step 4: change the port if needed
+## What you'll see
 
-If `6006` is already in use:
+SB3 writes the standard scalars:
+
+- `rollout/ep_rew_mean` — mean episode reward (the primary signal you want to climb).
+- `rollout/ep_len_mean` — episode length in steps.
+- `train/loss`, `train/policy_loss`, `train/value_loss`, `train/entropy_loss`, `train/explained_variance`, `train/clip_fraction` — PPO training diagnostics.
+- `time/fps`, `time/iterations` — throughput.
+- `eval/mean_reward`, `eval/mean_ep_length` — periodic eval rollouts.
+
+If you serve the whole `artifacts/` dir, every chunk shows up as a separate run in the left sidebar. Use the regex filter at the top of the sidebar to narrow them down (`^quick_test_` to see only your latest experiment, etc.).
+
+## Old runs from before the refactor
+
+Pre-refactor run dirs (e.g. `long_4h_rtf100_*`, `test_cpu_persist*`, `test_long_limit_rtf100`) are still on disk. Hide them with the sidebar regex filter, or delete:
 
 ```bash
-cd /mnt/hd/Repos/gym-dr
-PORT=6010 RUN_NAME=tb_test ./run_tensorboard.sh
+rm -rf artifacts/long_4h_rtf100_* artifacts/test_*
 ```
 
-Then open:
-
-```text
-http://localhost:6010
-```
-
-## How the helper works
-
-The helper script runs TensorBoard inside Docker and mounts the local `artifacts/` folder into the container.
-
-You do not need a local Python install for this workflow as long as the project image has been rebuilt.
-
-## How to verify it is working
-
-Check whether event files exist:
+## Verify event files exist
 
 ```bash
-find artifacts/tb_test/tensorboard -type f
+find artifacts/<chunk_name>/tensorboard -type f
 ```
 
-If TensorBoard logging is active, you should see files with names similar to:
-
-```text
-events.out.tfevents....
-```
-
-You can also inspect the run config:
-
-```bash
-cat artifacts/tb_test/run_config.json
-```
+You should see `events.out.tfevents.*` files. If the dir is empty, the chunk hasn't flushed events yet (give it ~30 s of training) or `cfg.tracking.tensorboard` was set to `False`.
 
 ## Troubleshooting
 
-### TensorBoard page opens but no runs appear
+### `MessageToJson() got an unexpected keyword argument 'including_default_value_fields'`
 
-Most common causes:
+You're running the *container's* old TensorBoard. Use `./run_tensorboard.sh` (which now invokes the host's TB via `uv run tensorboard`) — not `docker run ... tensorboard`.
 
-- the image was not rebuilt after adding `tensorboard`
-- the run started from an older image
-- the selected `RUN_NAME` is wrong
-- the run has not progressed enough to flush event files yet
-
-Check:
+### Port already in use
 
 ```bash
-find artifacts/<RUN_NAME>/tensorboard -type f
+PORT=6007 ./run_tensorboard.sh
 ```
 
-### Training log says TensorBoard is disabled
+### Multiple chunks, want one continuous reward curve
 
-If the log contains:
-
-```text
-tensorboard is not installed; disabling tensorboard logging
-```
-
-that run will not produce TensorBoard event files.
-
-Rebuild the image and start a new run.
-
-### I want TensorBoard for the currently running 4-hour job
-
-If that job started from an image without TensorBoard installed, it will not begin emitting TensorBoard events mid-run.
-
-You would need to:
-
-1. rebuild the image
-2. stop the old run or let it finish
-3. start a new run or resume from `latest_model.zip`
-
-Example resume flow:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
-RUN_NAME=tb_resume \
-RESUME_FROM=/workspace/artifacts/long_4h_rtf100_20260408_145000/latest_model.zip \
-TOTAL_TIMESTEPS=1000000000 \
-MAX_TRAIN_SECONDS=14400 \
-RTF_OVERRIDE=100 \
-./run_cpu_training.sh
-```
-
-Then launch:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
-RUN_NAME=tb_resume ./run_tensorboard.sh
-```
-
-## Related files
-
-- [requirements.txt](/mnt/hd/Repos/gym-dr/requirements.txt)
-- [train.py](/mnt/hd/Repos/gym-dr/train.py)
-- [run_cpu_training.sh](/mnt/hd/Repos/gym-dr/run_cpu_training.sh)
-- [run_tensorboard.sh](/mnt/hd/Repos/gym-dr/run_tensorboard.sh)
+The host orchestrator tags every chunk with `run_group=<experiment.name>`. In TensorBoard the chunks appear as separate runs (they technically are), but the MLflow UI groups them via the `run_group` tag — easier comparison there. See [tracking.md](tracking.md).
