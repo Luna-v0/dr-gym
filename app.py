@@ -72,6 +72,7 @@ base = ExperimentConfig(
         rtf_override=10,
     ),
     tracking=TrackingConfig(mlflow_experiment="gym-dr-hpo"),
+    enable_gui=True,   # watch the car: VNC client -> localhost:5900
 )
 
 

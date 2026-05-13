@@ -249,6 +249,13 @@ class ExperimentConfig:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     """MLflow + TensorBoard settings."""
 
+    enable_gui: bool = False
+    """When ``True``, the simapp boots Gazebo with its GUI/VNC enabled. The
+    host orchestrator passes ``ENABLE_GUI=True`` and publishes VNC port
+    5900 (or ``5900 + worker_idx`` for parallel HPO workers). Connect any
+    VNC client to ``localhost:5900`` to watch the car drive in real time.
+    Adds Gazebo rendering overhead — leave off for long unattended runs."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON dump / MLflow logging.
 

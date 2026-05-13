@@ -39,6 +39,7 @@ def _build_run_cmd(
     artifacts_dir: Path,
     container_name: str,
     env_vars: dict[str, str],
+    published_ports: list[tuple[int, int]] | None = None,
 ) -> list[str]:
     optuna_db = project_dir / "optuna.db"
     optuna_db.touch(exist_ok=True)
@@ -61,6 +62,8 @@ def _build_run_cmd(
         "-v",
         f"{optuna_db}:/workspace/optuna.db",
     ]
+    for host_port, container_port in published_ports or []:
+        argv.extend(["-p", f"{host_port}:{container_port}"])
     for key, value in env_vars.items():
         argv.extend(["-e", f"{key}={value}"])
     argv.append(image_tag)
@@ -71,15 +74,20 @@ def spawn_training_chunk(
     image_tag: str,
     container_name: str,
     base_env: dict[str, str],
+    published_ports: list[tuple[int, int]] | None = None,
 ) -> int:
     """Run one training chunk in a Docker container; block until exit.
 
     Returns the container's exit code. SIGINT/SIGTERM in the host process
-    docker-kills the container.
+    docker-kills the container. ``published_ports`` is a list of
+    ``(host_port, container_port)`` pairs forwarded via ``-p`` — used for
+    the VNC GUI when ``enable_gui=True``.
     """
     project_dir = _resolve_project_dir()
     artifacts_dir = _resolve_artifacts_dir(project_dir)
-    argv = _build_run_cmd(image_tag, project_dir, artifacts_dir, container_name, base_env)
+    argv = _build_run_cmd(
+        image_tag, project_dir, artifacts_dir, container_name, base_env, published_ports
+    )
     print(f"[train] spawning {container_name}: {' '.join(argv)}", flush=True)
 
     proc = subprocess.Popen(argv, stdout=sys.stdout, stderr=sys.stderr)
@@ -102,8 +110,13 @@ def spawn_workers(
     n_trials: int,
     n_parallel: int,
     base_env: dict[str, str],
+    vnc_base_port: int | None = None,
 ) -> int:
-    """Spawn N parallel HPO workers; wait on all; return worst exit code."""
+    """Spawn N parallel HPO workers; wait on all; return worst exit code.
+
+    If ``vnc_base_port`` is set, each worker publishes its container port
+    5900 to host port ``vnc_base_port + worker_idx`` for Gazebo VNC.
+    """
     project_dir = _resolve_project_dir()
     artifacts_dir = _resolve_artifacts_dir(project_dir)
     per_worker = max(1, math.ceil(n_trials / max(1, n_parallel)))
@@ -127,7 +140,8 @@ def spawn_workers(
             }
         )
         name = f"gym-dr-hpo-{study_name}-{idx}"
-        argv = _build_run_cmd(image_tag, project_dir, artifacts_dir, name, env_vars)
+        ports = [(vnc_base_port + idx, 5900)] if vnc_base_port is not None else None
+        argv = _build_run_cmd(image_tag, project_dir, artifacts_dir, name, env_vars, ports)
         print(f"[hpo] spawning {name}: {' '.join(argv)}", flush=True)
         proc = subprocess.Popen(argv, stdout=sys.stdout, stderr=sys.stderr)
         processes.append((name, proc))

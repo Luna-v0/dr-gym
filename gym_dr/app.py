@@ -163,16 +163,22 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
                 env["RESUME_FROM"] = resume_from
             if experiment.training.rtf_override is not None:
                 env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
+            ports: list[tuple[int, int]] | None = None
+            if experiment.enable_gui:
+                env["ENABLE_GUI"] = "True"
+                ports = [(5900, 5900)]
 
             print(
                 f"[train] chunk {chunk_idx + 1}/{worlds.rotations * len(worlds.names)}: "
-                f"world={world!r} resume_from={resume_from!r}",
+                f"world={world!r} resume_from={resume_from!r}"
+                + ("  (GUI on vnc://localhost:5900)" if experiment.enable_gui else ""),
                 flush=True,
             )
             rc = spawn_training_chunk(
                 image_tag=image,
                 container_name=container_name,
                 base_env=env,
+                published_ports=ports,
             )
             if rc != 0:
                 print(f"[train] chunk {container_name} exited rc={rc}; aborting", flush=True)
@@ -230,6 +236,15 @@ def _spawn_workers(
         "EXPERIMENT_PATH": _to_container_path(experiment_path, project_dir),
         **extra_env,
     }
+    vnc_base = None
+    if base.enable_gui:
+        env["ENABLE_GUI"] = "True"
+        vnc_base = 5900
+        print(
+            f"[hpo] GUI enabled — VNC on vnc://localhost:{vnc_base}"
+            + (f"..{vnc_base + n_parallel - 1}" if n_parallel > 1 else ""),
+            flush=True,
+        )
 
     return spawn_workers(
         image_tag=image,
@@ -237,6 +252,7 @@ def _spawn_workers(
         n_trials=n_trials,
         n_parallel=n_parallel,
         base_env=env,
+        vnc_base_port=vnc_base,
     )
 
 
