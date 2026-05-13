@@ -256,6 +256,15 @@ class ExperimentConfig:
     VNC client to ``localhost:5900`` to watch the car drive in real time.
     Adds Gazebo rendering overhead — leave off for long unattended runs."""
 
+    use_gpu: bool = False
+    """When ``True`` the host orchestrator passes ``--gpus all`` to
+    ``docker run`` so the container can see host GPUs. You separately need
+    a CUDA-capable image (``./bootstrap.sh -a gpu``) and a CUDA-aware
+    trainer config (``Sb3Trainer(device="cuda")``) — flipping this flag
+    alone is not enough. ``Sb3Trainer.fit`` checks ``torch.cuda.is_available``
+    at start and fails fast with a clear message if the pieces don't line
+    up, so misconfigurations crash on the host instead of mid-rollout."""
+
     seed: int | None = None
     """Random seed plumbed everywhere we control:
 
@@ -292,6 +301,7 @@ class ExperimentConfig:
             "training": dataclasses.asdict(self.training),
             "tracking": dataclasses.asdict(self.tracking),
             "enable_gui": self.enable_gui,
+            "use_gpu": self.use_gpu,
             "seed": self.seed,
         }
 

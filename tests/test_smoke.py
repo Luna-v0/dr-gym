@@ -235,6 +235,28 @@ def test_app_py_search_space_applies_to_base():
     assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 
+def test_cuda_without_runtime_raises_clear_error(container_mode):
+    """Sb3Trainer(device='cuda') must fail fast with a useful message when
+    CUDA isn't actually available (most common dev-env crash mode)."""
+    import pytest
+
+    tmp_path = container_mode
+    exp = _experiment("cuda_check", tmp_path).with_overrides(
+        **{"trainer.device": "cuda"}
+    )
+    try:
+        import torch
+        if torch.cuda.is_available():
+            pytest.skip("CUDA actually available — test only covers the missing-runtime path")
+    except ImportError:
+        pass
+    with pytest.raises(RuntimeError) as exc_info:
+        train(exp)
+    msg = str(exc_info.value)
+    assert "cuda" in msg.lower()
+    assert "use_gpu" in msg or "bootstrap" in msg
+
+
 def test_seed_lands_on_sb3_model(container_mode, monkeypatch):
     """experiment.seed reaches Sb3Trainer's algorithm kwargs (so PPO seeds itself
     and its first env.reset(seed=...))."""

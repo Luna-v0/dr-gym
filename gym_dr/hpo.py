@@ -42,10 +42,12 @@ def build_objective(
 ) -> Callable[[Any], float]:
     def objective(trial) -> float:
         overrides = search_space(trial)
-        trial_cfg = base_cfg.with_overrides(
-            name=f"{base_cfg.name}_trial_{trial.number}",
-            **overrides,
-        )
+        run_name = f"{base_cfg.name}_trial_{trial.number}"
+        trial_cfg = base_cfg.with_overrides(name=run_name, **overrides)
+        # Tag the Optuna trial with the shared run name so it appears in
+        # optuna-dashboard alongside the same identifier used by TB
+        # (artifact subdir) and MLflow (run_name).
+        trial.set_user_attr("run_name", run_name)
         return run_training(trial_cfg, trial=trial)
 
     return objective

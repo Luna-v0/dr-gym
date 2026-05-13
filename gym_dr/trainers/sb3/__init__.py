@@ -81,6 +81,29 @@ class Sb3Trainer:
             VecFrameStack,
         )
 
+        # Fail fast on common GPU misconfig: if cuda was requested but torch
+        # can't see a CUDA runtime, the error mid-rollout is cryptic ("invalid
+        # device ordinal", segfault in cuInit, etc.). Catch it here.
+        if self.device.lower().startswith("cuda"):
+            try:
+                import torch
+
+                if not torch.cuda.is_available():
+                    raise RuntimeError(
+                        "Sb3Trainer(device='cuda') was requested but "
+                        "torch.cuda.is_available() is False. Likely causes: "
+                        "(a) the container image was built without CUDA — "
+                        "rebuild via `./bootstrap.sh -a gpu`; "
+                        "(b) ExperimentConfig.use_gpu=False so docker run "
+                        "didn't get `--gpus all` — set use_gpu=True; "
+                        "(c) host lacks the NVIDIA Container Toolkit. "
+                        "Set device='cpu' if you don't need GPU."
+                    )
+            except ImportError:
+                raise RuntimeError(
+                    "Sb3Trainer(device='cuda') requested but torch is not installed."
+                )
+
         run_dir = ctx.run_dir
         tensorboard_dir = run_dir / "tensorboard"
         tensorboard_dir.mkdir(parents=True, exist_ok=True)
@@ -174,11 +197,15 @@ class Sb3Trainer:
         )
         callbacks.append(eval_callback)
 
+        # Unified naming: SB3's default TB subdir is "<AlgoClass>_<auto_idx>"
+        # (e.g. PPO_1). Naming it after the run makes the TB sidebar legible
+        # and matches the MLflow run name + the Optuna trial.user_attr.
         try:
             model.learn(
                 total_timesteps=ctx.training.total_timesteps,
                 callback=CallbackList(callbacks),
                 reset_num_timesteps=not bool(ctx.training.resume_from),
+                tb_log_name=ctx.run_dir.name,
             )
         finally:
             ctx.save_model(

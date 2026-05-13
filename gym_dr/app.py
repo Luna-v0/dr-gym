@@ -179,6 +179,7 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
                 container_name=container_name,
                 base_env=env,
                 published_ports=ports,
+                use_gpu=experiment.use_gpu,
             )
             if rc != 0:
                 print(f"[train] chunk {container_name} exited rc={rc}; aborting", flush=True)
@@ -253,6 +254,7 @@ def _spawn_workers(
         n_parallel=n_parallel,
         base_env=env,
         vnc_base_port=vnc_base,
+        use_gpu=base.use_gpu,
     )
 
 

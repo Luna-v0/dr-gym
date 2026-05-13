@@ -40,6 +40,7 @@ def _build_run_cmd(
     container_name: str,
     env_vars: dict[str, str],
     published_ports: list[tuple[int, int]] | None = None,
+    use_gpu: bool = False,
 ) -> list[str]:
     optuna_db = project_dir / "optuna.db"
     optuna_db.touch(exist_ok=True)
@@ -62,6 +63,8 @@ def _build_run_cmd(
         "-v",
         f"{optuna_db}:/workspace/optuna.db",
     ]
+    if use_gpu:
+        argv.extend(["--gpus", "all"])
     for host_port, container_port in published_ports or []:
         argv.extend(["-p", f"{host_port}:{container_port}"])
     for key, value in env_vars.items():
@@ -75,18 +78,21 @@ def spawn_training_chunk(
     container_name: str,
     base_env: dict[str, str],
     published_ports: list[tuple[int, int]] | None = None,
+    use_gpu: bool = False,
 ) -> int:
     """Run one training chunk in a Docker container; block until exit.
 
     Returns the container's exit code. SIGINT/SIGTERM in the host process
     docker-kills the container. ``published_ports`` is a list of
     ``(host_port, container_port)`` pairs forwarded via ``-p`` — used for
-    the VNC GUI when ``enable_gui=True``.
+    the VNC GUI when ``enable_gui=True``. ``use_gpu`` adds ``--gpus all``
+    to expose host GPUs to the container (requires NVIDIA Container Toolkit).
     """
     project_dir = _resolve_project_dir()
     artifacts_dir = _resolve_artifacts_dir(project_dir)
     argv = _build_run_cmd(
-        image_tag, project_dir, artifacts_dir, container_name, base_env, published_ports
+        image_tag, project_dir, artifacts_dir, container_name, base_env,
+        published_ports, use_gpu=use_gpu,
     )
     print(f"[train] spawning {container_name}: {' '.join(argv)}", flush=True)
 
@@ -111,6 +117,7 @@ def spawn_workers(
     n_parallel: int,
     base_env: dict[str, str],
     vnc_base_port: int | None = None,
+    use_gpu: bool = False,
 ) -> int:
     """Spawn N parallel HPO workers; wait on all; return worst exit code.
 
@@ -141,7 +148,9 @@ def spawn_workers(
         )
         name = f"gym-dr-hpo-{study_name}-{idx}"
         ports = [(vnc_base_port + idx, 5900)] if vnc_base_port is not None else None
-        argv = _build_run_cmd(image_tag, project_dir, artifacts_dir, name, env_vars, ports)
+        argv = _build_run_cmd(
+            image_tag, project_dir, artifacts_dir, name, env_vars, ports, use_gpu=use_gpu,
+        )
         print(f"[hpo] spawning {name}: {' '.join(argv)}", flush=True)
         proc = subprocess.Popen(argv, stdout=sys.stdout, stderr=sys.stderr)
         processes.append((name, proc))
