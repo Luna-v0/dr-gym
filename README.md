@@ -249,13 +249,47 @@ gym_dr/
 | Algorithm registry + off-policy caveats | [docs/algorithms.md](docs/algorithms.md) |
 | Physical-car export caveats | [docs/physical-car-integration-notes.md](docs/physical-car-integration-notes.md) |
 
+## Physical-car export
+
+Once you have a trained model (SB3 `.zip`), package it for the on-device loader:
+
+```bash
+# from an SB3 zip — metadata is auto-picked up from the sibling .model_metadata.json:
+uv run python scripts/export_bundle.py \
+    --model artifacts/<run>/final_model.zip \
+    --output bundle.tar.gz
+
+# or, with explicit metadata from your app.py:
+uv run python scripts/export_bundle.py \
+    --model artifacts/<run>/final_model.zip \
+    --app app.py \
+    --output bundle.tar.gz
+
+# or, packaging a pre-existing TF frozen-graph .pb verbatim:
+uv run python scripts/export_bundle.py \
+    --model my_model.pb \
+    --metadata my_metadata.json \
+    --output bundle.tar.gz
+```
+
+Bundle layout (all paths produce the same contract):
+
+```text
+bundle.tar.gz
+├── model_metadata.json
+└── agent/
+    └── agent.{pb,onnx}
+```
+
+SB3 zips are exported to ONNX (`agent.onnx`); pre-existing `.pb` / `.onnx` files are packaged verbatim. `--bundle-filename` overrides the in-tar filename if your target expects something different. See [docs/physical-car-integration-notes.md](docs/physical-car-integration-notes.md) for the on-device caveats.
+
 ## Tests
 
 ```bash
-uv run pytest tests/test_smoke.py
+uv run pytest tests/
 ```
 
-The smoke test wires a stub env in place of the upstream sim and exercises the whole orchestrator → `Sb3Trainer` → `TrainingContext` flow, including per-chunk env-var overrides, custom reward archival, `with_overrides` immutability, and the `Trainer` protocol's duck typing.
+The smoke suite wires a stub env in place of the upstream sim and exercises the whole orchestrator → `Sb3Trainer` → `TrainingContext` flow, plus the export-bundle script. Stable suite is 18 tests + 1 conditional skip.
 
 ## Resume training
 
