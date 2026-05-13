@@ -1,0 +1,26 @@
+# Longer training run: capped at 4h wall-clock with high requested RTF.
+# Copy this file, edit, and launch with:
+#   ./run_cpu_training.sh configs/<your_file>.yaml
+
+run_name: default_4h
+world_name: reinvent_base
+
+# PPO hyperparameters
+total_timesteps: 1000000000   # effectively unlimited; the wall-clock limit stops training
+n_steps: 256
+batch_size: 64
+learning_rate: 3.0e-4
+ent_coef: 0.01
+
+# Training control
+checkpoint_freq: 1024
+max_train_seconds: 14400      # 4 hours
+status_update_steps: 1000
+status_update_seconds: 60
+
+# Hardware / simulator
+sb3_device: cpu
+rtf_override: 100             # request high simulator speed (not guaranteed by Gazebo)
+
+# Resume
+resume_from: null

@@ -9,6 +9,8 @@ from importlib.util import find_spec
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from deepracer_env.environments.deepracer_env import DeepRacerEnv
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
@@ -21,28 +23,56 @@ MODEL_METADATA_PATH = PROJECT_ROOT / "model_metadata.json"
 REWARD_SOURCE_PATH = PROJECT_ROOT / "reward.py"
 
 
-def get_env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    return int(value) if value else default
+def load_yaml_config() -> dict:
+    config_path = os.getenv("CONFIG_PATH")
+    if not config_path:
+        return {}
+    data = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"CONFIG_PATH ({config_path}) must contain a YAML mapping")
+    return data
 
 
-def get_env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    return float(value) if value else default
+def _resolve(name: str, config: dict):
+    """Env var (uppercase) wins, else YAML key (lowercase), else None."""
+    env_val = os.getenv(name.upper())
+    if env_val is not None and env_val != "":
+        return env_val
+    return config.get(name.lower())
 
 
-def get_env_optional_int(name: str) -> int | None:
-    value = os.getenv(name)
-    return int(value) if value else None
+def get_int(name: str, config: dict, default: int) -> int:
+    val = _resolve(name, config)
+    return default if val is None else int(val)
+
+
+def get_float(name: str, config: dict, default: float) -> float:
+    val = _resolve(name, config)
+    return default if val is None else float(val)
+
+
+def get_str(name: str, config: dict, default: str | None = None) -> str | None:
+    val = _resolve(name, config)
+    return default if val is None else str(val)
+
+
+def get_optional_int(name: str, config: dict) -> int | None:
+    val = _resolve(name, config)
+    return None if val is None else int(val)
+
+
+def get_optional_str(name: str, config: dict) -> str | None:
+    val = _resolve(name, config)
+    return None if val is None else str(val)
 
 
 def current_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
-def build_run_paths() -> dict[str, Path]:
+def build_run_paths(config: dict) -> dict[str, Path]:
     artifacts_dir = Path(os.getenv("ARTIFACTS_DIR", str(PROJECT_ROOT / "artifacts")))
-    run_name = os.getenv("RUN_NAME", f"deepracer_cpu_{current_timestamp()}")
+    run_name = get_str("RUN_NAME", config) or f"deepracer_cpu_{current_timestamp()}"
     run_dir = artifacts_dir / run_name
 
     return {
@@ -189,22 +219,28 @@ class WallClockLimitCallback(BaseCallback):
 def main() -> None:
     install_signal_handlers()
 
-    total_timesteps = get_env_int("TOTAL_TIMESTEPS", 500_000)
-    checkpoint_freq = get_env_int("CHECKPOINT_FREQ", 1_000)
-    n_steps = get_env_int("N_STEPS", 256)
-    batch_size = get_env_int("BATCH_SIZE", 64)
-    learning_rate = get_env_float("LEARNING_RATE", 3e-4)
-    ent_coef = get_env_float("ENT_COEF", 0.01)
-    device = os.getenv("SB3_DEVICE", "cpu")
-    resume_from = os.getenv("RESUME_FROM")
-    max_train_seconds = get_env_optional_int("MAX_TRAIN_SECONDS")
-    status_update_steps = get_env_int("STATUS_UPDATE_STEPS", 1_000)
-    status_update_seconds = get_env_int("STATUS_UPDATE_SECONDS", 30)
+    yaml_config = load_yaml_config()
+    config_path = os.getenv("CONFIG_PATH")
+    if config_path:
+        print(f"Loaded config: {config_path}", flush=True)
 
-    paths = build_run_paths()
-    config = {
+    total_timesteps = get_int("TOTAL_TIMESTEPS", yaml_config, 500_000)
+    checkpoint_freq = get_int("CHECKPOINT_FREQ", yaml_config, 1_000)
+    n_steps = get_int("N_STEPS", yaml_config, 256)
+    batch_size = get_int("BATCH_SIZE", yaml_config, 64)
+    learning_rate = get_float("LEARNING_RATE", yaml_config, 3e-4)
+    ent_coef = get_float("ENT_COEF", yaml_config, 0.01)
+    device = get_str("SB3_DEVICE", yaml_config, "cpu")
+    resume_from = get_optional_str("RESUME_FROM", yaml_config)
+    max_train_seconds = get_optional_int("MAX_TRAIN_SECONDS", yaml_config)
+    status_update_steps = get_int("STATUS_UPDATE_STEPS", yaml_config, 1_000)
+    status_update_seconds = get_int("STATUS_UPDATE_SECONDS", yaml_config, 30)
+
+    paths = build_run_paths(yaml_config)
+    run_config = {
         "run_name": paths["run_dir"].name,
-        "world_name": os.getenv("WORLD_NAME", "reinvent_base"),
+        "config_path": config_path,
+        "world_name": get_str("WORLD_NAME", yaml_config, "reinvent_base"),
         "total_timesteps": total_timesteps,
         "checkpoint_freq": checkpoint_freq,
         "n_steps": n_steps,
@@ -213,13 +249,15 @@ def main() -> None:
         "ent_coef": ent_coef,
         "device": device,
         "resume_from": resume_from,
-        "rtf_override": os.getenv("RTF_OVERRIDE"),
+        "rtf_override": get_optional_str("RTF_OVERRIDE", yaml_config),
         "max_train_seconds": max_train_seconds,
         "status_update_steps": status_update_steps,
         "status_update_seconds": status_update_seconds,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
     }
-    prepare_export_bundle(paths, config)
+    prepare_export_bundle(paths, run_config)
+    if config_path:
+        shutil.copy2(config_path, paths["run_dir"] / "config.yaml")
 
     print(f"Artifacts directory: {paths['run_dir']}", flush=True)
     print(f"TensorBoard directory: {paths['tensorboard_dir']}", flush=True)

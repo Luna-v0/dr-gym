@@ -1,0 +1,26 @@
+# Smoke-test config: ~5k timesteps, fast feedback.
+# Copy this file, edit, and launch with:
+#   ./run_cpu_training.sh configs/<your_file>.yaml
+
+run_name: quick_test          # output dir under artifacts/<run_name>/. Set to null to auto-generate.
+world_name: reinvent_base     # DeepRacer track
+
+# PPO hyperparameters
+total_timesteps: 5000
+n_steps: 256
+batch_size: 64
+learning_rate: 3.0e-4
+ent_coef: 0.01
+
+# Training control
+checkpoint_freq: 1000         # save a checkpoint every N timesteps
+max_train_seconds: null       # null = no wall-clock limit
+status_update_steps: 1000
+status_update_seconds: 30
+
+# Hardware / simulator
+sb3_device: cpu               # cpu | cuda
+rtf_override: null            # Gazebo real-time factor (e.g. 100). null = simulator default.
+
+# Resume
+resume_from: null             # container path to a .zip checkpoint, or null to start fresh

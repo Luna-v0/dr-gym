@@ -9,3 +9,6 @@ venv/
 .env
 .DS_Store
 .codex
+
+.deepracer-env-upstream/
+.claude/
