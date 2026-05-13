@@ -16,10 +16,15 @@ from gym_dr import ExperimentConfig, study, ...
 
 base = ExperimentConfig(...)        # everything not swept
 
+def make_reward(weight_close=100.0):
+    def reward(p):
+        return weight_close if p["distance_from_center"] <= 0.1 * p["track_width"] else 1e-3
+    return reward
+
 def search_space(trial) -> dict:
     return {
-        "algorithm.kwargs.learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-        "reward.params.reward_center":    trial.suggest_float("reward_center", 10.0, 200.0),
+        "trainer.kwargs.learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
+        "reward": make_reward(weight_close=trial.suggest_float("weight_close", 10.0, 200.0)),
         # ... flat dotted keys consumed by cfg.with_overrides(...)
     }
 
@@ -27,7 +32,7 @@ if __name__ == "__main__":
     study(base, search_space, study_name="hpo", n_trials=40, n_parallel=4)
 ```
 
-The returned dict is applied via `cfg.with_overrides(**overrides)`. Dotted keys walk the dataclass tree; dict-typed fields (`algorithm.kwargs`, `reward.params`) accept the leaf.
+The returned dict is applied via `cfg.with_overrides(**overrides)`. Dotted keys walk the dataclass tree; dict-typed fields (`trainer.kwargs`) accept the leaf. Whole fields (like `reward`) can be replaced by passing a non-dotted key.
 
 ## Orchestration
 
@@ -56,7 +61,7 @@ optuna-dashboard sqlite:///$PWD/optuna.db
 
 ## Caveats
 
-- **Action-space and `world_name` are fixed per study.** The simapp loads them at container start. To vary either, launch separate studies.
+- **Action-space and world are fixed per study.** The simapp loads the world at container start; HPO uses `base.worlds.names[0]`. To sweep across worlds, launch separate studies.
 - **Network arch / policy class are out of the v1 search space.** Algorithm choice is fixed per study (it's a field on the base config, not a sampled param).
 - **Trial artifacts** land under `artifacts/<name>_trial_<n>/` with the full standard layout — every checkpoint still gets its metadata sibling.
 - If two workers grab `n_trials=N` each and only ~M trials are still pending in the study, Optuna's coordination via SQLite handles the duplicate work cleanly (the second worker just sees the study is full and stops).

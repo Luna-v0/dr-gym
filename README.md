@@ -1,65 +1,72 @@
 # DeepRacer SB3 Training Environment
 
-A Python-first, pluggable RL training pipeline for `seresheim/deepracer-env` inside Docker. The user owns a single `app.py` that wires together an env, a trainer, a reward, and an action space. Everything else (artifact layout, MLflow tracking, per-checkpoint DeepRacer metadata sidecars, Optuna HPO across parallel Docker workers, TensorBoard) is provided by `gym_dr` and works for any user-supplied trainer/env that implements the interfaces.
+A Python-first, pluggable RL training pipeline for [`seresheim/deepracer-env`](https://github.com/seresheim/deepracer-env) inside Docker. The user owns a single `app.py` that wires together an env, a trainer, a reward function, an action space, and a list of worlds. Everything else (artifact layout, MLflow tracking, per-checkpoint DeepRacer metadata sidecars, Optuna HPO across parallel Docker workers, TensorBoard, multi-world sequential rotation) is provided by `gym_dr`.
 
 ```text
-app.py        ←  the user edits this
-   │
-   └──► gym_dr.train(experiment)
-            │
-            ├──► env_factory(experiment)        ←  pluggable env (deepracer_env_v1, _v2, …, or your own)
-            ├──► trainer.fit(env, ctx)          ←  pluggable trainer (Sb3Trainer, or anything you write)
-            └──► MLflow + artifact layout + DeepRacer metadata sidecars (provided)
+app.py                                ← user edits
+  │
+  └── train(experiment)               ← host: orchestrates Docker chunks
+        │
+        └── (per world × rotation) docker run → python app.py
+              │
+              └── train(experiment)   ← container: runs one chunk
+                    │
+                    ├── env_factory(experiment)    ← pluggable (time_trial, …)
+                    ├── trainer.fit(env, ctx)      ← pluggable (Sb3Trainer, …)
+                    └── MLflow + metadata sidecars (provided)
 ```
 
 ## Plug-in points
 
-| What | Interface | Default | Where |
+| What | Interface | Default | Where to add yours |
 |---|---|---|---|
-| Env | `Callable[[ExperimentConfig], gym.Env]` | `deepracer_env_v1` | `gym_dr/envs/` |
-| Trainer | `Trainer` protocol: `fit(env, ctx) -> TrainResult` | `Sb3Trainer` (SB3 PPO/SAC/TD3/A2C/DDPG) | `gym_dr/trainers/` |
-| Reward | `RewardFactory: (params) -> reward_fn(params) -> float` | `center_line` | `gym_dr/reward.py` |
-| Action space | `ContinuousActionSpaceConfig` \| `DiscreteActionSpaceConfig` | continuous | `gym_dr/action_space.py` |
-| Tracker | hard-wired to MLflow (file store under `./mlruns/`) | — | `gym_dr/mlflow_utils.py` |
+| Env | `(ExperimentConfig) -> gym.Env` | `gym_dr.envs.time_trial` | `gym_dr/envs/` (or any module) |
+| Trainer | `Trainer` protocol: `fit(env, ctx) -> TrainResult` | `gym_dr.trainers.Sb3Trainer` | `gym_dr/trainers/` (or any module) |
+| Reward | `(params: dict) -> float` | `gym_dr.rewards.center_line` | written directly in `app.py` |
+| Action space | `ContinuousActionSpaceConfig` or `DiscreteActionSpaceConfig` | continuous | configured in `app.py` |
+| Worlds | `WorldsConfig(names, chunk_steps, rotations)` | `["reinvent_base"]` × 1 chunk | configured in `app.py` |
+
+The reward is a plain Python function (no registry). For HPO over reward weights, write a closure factory like `make_center_line(weight=...)` and have your search space return a freshly-built callable each trial — see `experiments/hpo_example.py`.
 
 ## Prerequisites
 
 - Docker (daemon running, `buildx` available)
 - `git`
-- [`uv`](https://github.com/astral-sh/uv)
+- [`uv`](https://github.com/astral-sh/uv) for host-side Python
 - ~50 GB free in Docker's storage location for the first build
 
 ## First-time setup
 
 ```bash
 cd /mnt/hd/Repos/gym-dr
-./bootstrap.sh        # builds upstream simulator image + project image
-uv sync               # host-side Python deps (launcher / HPO orchestrator)
+./bootstrap.sh        # upstream simulator image + project image
+uv sync               # host-side Python deps
 ```
 
-Re-run `./bootstrap.sh` only after editing `pyproject.toml`. `./bootstrap.sh -h` for `-a gpu` etc.
+Re-run `./bootstrap.sh` only when `pyproject.toml` changes.
 
 ## Running a training: `app.py`
 
-The user edits `app.py`. Full file (this is the default `app.py` shipped with the repo):
+The user edits `app.py`. Minimal shape:
 
 ```python
 from gym_dr import (
-    ContinuousActionSpaceConfig, ExperimentConfig, RewardConfig,
-    Sb3Trainer, TrackingConfig, TrainingConfig, deepracer_env_v1, train,
+    ContinuousActionSpaceConfig, ExperimentConfig, Sb3Trainer,
+    TrackingConfig, TrainingConfig, WorldsConfig,
+    center_line, time_trial, train,
 )
 
 experiment = ExperimentConfig(
     name="quick_test",
-    world_name="reinvent_base",
-    env_factory=deepracer_env_v1,
+    env_factory=time_trial,
     trainer=Sb3Trainer(
         name="ppo", policy="MultiInputPolicy",
         kwargs={"n_steps": 256, "batch_size": 64, "learning_rate": 3e-4, "ent_coef": 0.01},
     ),
-    reward=RewardConfig(factory="center_line", params={}),
+    reward=center_line,
     action_space=ContinuousActionSpaceConfig(),
-    training=TrainingConfig(total_timesteps=5_000, eval_freq=2_500),
+    worlds=WorldsConfig(names=["reinvent_base"], chunk_steps=5_000, rotations=1),
+    training=TrainingConfig(total_timesteps=5_000, eval_freq=2_500, n_eval_episodes=2),
     tracking=TrackingConfig(),
 )
 
@@ -67,84 +74,108 @@ if __name__ == "__main__":
     train(experiment)
 ```
 
-Launch (Docker is wrapped by the helper script):
+Run it directly from the host — `train()` handles Docker, multi-world rotation, MLflow:
 
 ```bash
-./run_cpu_training.sh             # uses ./app.py
-./run_cpu_training.sh other_app.py
+uv run python app.py
 ```
 
-## Swapping the env
+## Writing a custom reward
 
-Add a new factory and point `env_factory` at it:
+Just write a function and pass it. The dict argument is the upstream DeepRacer reward-params dict — `track_width`, `distance_from_center`, `progress`, `speed`, `all_wheels_on_track`, `is_offtrack`, `waypoints`, etc. (See `.deepracer-env-upstream/deepracer_env/agent_ctrl/constants.py:108` for the full list.)
 
 ```python
-# gym_dr/envs/deepracer.py  (or your own module)
-def deepracer_env_v2(experiment):
-    from deepracer_env_v2 import DeepRacerEnv as V2
-    from gym_dr.reward import make_reward
-    return V2(reward_fn=make_reward(experiment.reward), world=experiment.world_name)
+def stay_centered_and_fast(params: dict) -> float:
+    if not params["all_wheels_on_track"]:
+        return 1e-3
+    centeredness = 1.0 - params["distance_from_center"] / params["track_width"]
+    return float(centeredness * params["speed"])
+
+experiment = ExperimentConfig(reward=stay_centered_and_fast, ...)
 ```
 
+The reward function's source is auto-archived into `artifacts/<run_name>/reward_function.py` via `inspect.getsource`.
+
+## Multi-world training
+
+`WorldsConfig` controls how worlds are rotated. The simapp loads its world at container startup and **cannot** be switched at runtime today, so the host orchestrator runs each `(rotation, world)` chunk in its own container, resuming each chunk from the previous chunk's `latest_model.zip`. PPO's policy and optimizer state carry over cleanly; off-policy replay buffers don't (PPO has none).
+
 ```python
-# app.py
-from gym_dr.envs import deepracer_env_v2
-experiment = ExperimentConfig(env_factory=deepracer_env_v2, ...)
+worlds=WorldsConfig(
+    names=["reinvent_base", "Bowtie_track", "AmericasGeneratedInclStart"],
+    chunk_steps=20_000,
+    rotations=3,
+)
 ```
 
-The factory is any callable `(ExperimentConfig) -> gym.Env`.
+This runs **9 chunks** in order `reinvent_base → Bowtie_track → AmericasGeneratedInclStart → reinvent_base → ...`, each 20k timesteps, each resuming from the last. All chunks log under one MLflow parent run (named after `experiment.name`); the UI nests them as children for easy comparison.
 
-## Swapping the trainer
+Valid world names are in `.deepracer-env-upstream/tracks.txt`.
 
-`Sb3Trainer` is the default. To use a different RL library or a hand-rolled loop, implement `Trainer`:
+## Plugging in a custom trainer (non-SB3)
+
+`Sb3Trainer` is the default. Any object with a `fit(env, ctx) -> TrainResult` method is a trainer — no inheritance required (it's a `runtime_checkable` Protocol).
 
 ```python
-from gym_dr.trainers.base import Trainer, TrainingContext, TrainResult
+from gym_dr.trainers.base import TrainingContext, TrainResult
 
 class MyTrainer:
-    """Anything with this method shape satisfies gym_dr.Trainer."""
     def __init__(self, lr: float = 1e-3):
         self.lr = lr
 
     def fit(self, env, ctx: TrainingContext) -> TrainResult:
-        # ... your training loop ...
-        for step in range(ctx.training.total_timesteps):
-            ...
-            if step % ctx.training.eval_freq == 0:
-                ctx.report_eval(mean_reward, step=step)            # MLflow log + Optuna prune
-            if step % ctx.training.checkpoint_freq == 0:
-                ctx.save_checkpoint(self._save, step=step)         # zip + metadata sidecar
-        return TrainResult(final_eval_reward=mean_reward)
-```
+        ctx.save_model(self._save, name="initial_model")
+        try:
+            for step in range(ctx.training.total_timesteps):
+                ...  # your training step
+                if step % ctx.training.eval_freq == 0:
+                    mean = self._evaluate(env)
+                    ctx.report_eval(mean, step=step)     # MLflow + Optuna prune
+                if step % ctx.training.checkpoint_freq == 0:
+                    ctx.save_checkpoint(self._save, step=step)
+            ctx.save_model(self._save, name="final_model")
+            return TrainResult(final_eval_reward=mean)
+        finally:
+            ctx.save_model(self._save, name="latest_model")
 
-```python
-# app.py
 experiment = ExperimentConfig(trainer=MyTrainer(lr=5e-4), ...)
 ```
 
-The `TrainingContext` (see `gym_dr/trainers/base.py`) gives the trainer the four hooks it needs:
+`TrainingContext` (`gym_dr/trainers/base.py`) gives the trainer four hooks; using them is what makes MLflow logging + per-checkpoint DeepRacer metadata + Optuna pruning Just Work for your trainer too.
 
-- `ctx.save_model(save_fn, name=...)` — writes `<run_dir>/<name>.zip` + `<name>.model_metadata.json`
-- `ctx.save_checkpoint(save_fn, step=...)` — writes `checkpoints/<prefix>_<step>_steps.zip` + metadata sidecar
-- `ctx.log_metric(name, value, step)` — mirrors to the active MLflow run
-- `ctx.report_eval(mean_reward, step)` — `log_metric("eval_mean_reward", ...)` + Optuna `trial.report` / pruning
+## Plugging in a custom env
 
-The orchestrator (`gym_dr/trainer.py:run_training`) handles everything around `fit`: run-dir setup, `model_metadata.json` generation, MLflow `start_run`, artifact upload at end, and `training_status.json` lifecycle.
+Write a callable `(experiment) -> gym.Env`:
+
+```python
+# gym_dr/envs/object_avoidance.py (or any module)
+def object_avoidance(experiment):
+    from deepracer_env.environments.deepracer_env import DeepRacerEnv
+    return DeepRacerEnv(
+        reward_fn=experiment.reward,
+        sensors=list(experiment.action_space.sensor),
+        config={"race_type": "OBJECT_AVOIDANCE"},
+    )
+
+experiment = ExperimentConfig(env_factory=object_avoidance, ...)
+```
+
+The upstream `RaceType` enum has `TIME_TRIAL` (current default), `OBJECT_AVOIDANCE`, `HEAD_TO_BOT`, `HEAD_TO_MODEL`, `F1` — `.deepracer-env-upstream/deepracer_env/reset/constants.py:21`.
 
 ## HPO
 
-Same script-per-experiment pattern. Defines a `base` config + a `search_space(trial)` function + `study(...)` at the bottom. The same script runs unchanged inside each worker container — `study()` detects worker mode via `GYM_DR_WORKER`.
+`experiments/hpo_example.py` is a runnable script. Defines a `base` config + a `search_space(trial)` function + `study(...)` at the bottom. Run it from the host:
 
 ```bash
 uv run python experiments/hpo_example.py
 ```
 
-Details: [docs/hpo.md](docs/hpo.md).
+The same script runs unchanged inside each worker container — `study()` detects worker mode via `GYM_DR_WORKER`. See `docs/hpo.md` for details.
 
 ## Inspect without running
 
 ```bash
-uv run python -m gym_dr.cli inspect app.py
+uv run python -c "from app import experiment; from gym_dr import inspect; inspect(experiment)"
 ```
 
 ## Iterating without rebuilding
@@ -152,29 +183,41 @@ uv run python -m gym_dr.cli inspect app.py
 Project source is bind-mounted at `/workspace` in the container. Edit and re-run — no `docker build`:
 
 - Hyperparameters / training control / algorithm choice → edit `app.py`
-- Reward shaping → add a factory in `gym_dr/reward.py` and reference it from `app.py`
-- Action space (continuous bounds or discrete action list) → edit `action_space` in `app.py`
-- Custom trainer → drop a file anywhere, import it in `app.py`
-- Custom env → drop a factory in `gym_dr/envs/` or your own module
+- Reward shaping → write a function in `app.py`
+- Action space / worlds → edit `app.py`
+- Custom trainer / env → drop a file anywhere, import it in `app.py`
 
 Rebuild only when `pyproject.toml` changes.
+
+## Future work — robust runtime world switching
+
+The current multi-world implementation rotates worlds by **respawning the container**. Each switch pays Gazebo's startup cost (~5–10 s). A more robust design would switch worlds *inside* a single running container so the policy, optimizer state, replay buffer, and TB session all persist.
+
+Doing this cleanly requires changes to upstream [`seresheim/deepracer-env`](https://github.com/seresheim/deepracer-env):
+
+1. **`TrackData` must accept a setter.** Today it is a singleton that reads `WORLD_NAME` from `rospy` at first construction and caches waypoints from `routes/<name>.npy` for the rest of the process (`deepracer_env/track_geom/track_data.py:186–192`). We need a public `TrackData.set_world(name: str)` that drops the cached waypoints, re-reads the routes file, and notifies any subscriber that holds a reference to the geometry. Contract: must be called between episodes (between `env.reset()` and the first `env.step()` of the new episode), never mid-episode.
+2. **Gazebo world swap.** Use `gazebo_msgs/DeleteModel` on the current track meshes, then `gazebo_msgs/SpawnModel` on the new track's SDF. The simapp owns the world; this likely lives in `racetrack_with_racecar.launch`'s Python helpers.
+3. **`DeepRacerEnv.change_world(name: str)` hook.** Public method on the env that (a) calls into the simapp's world-swap RPC, (b) calls `TrackData.set_world(name)`, (c) resets the start position.
+
+Once the upstream API exists, `gym_dr/envs/time_trial.py` exposes `env.change_world(...)` and the orchestrator rotates worlds mid-fit via an SB3 callback that fires every `WorldsConfig.chunk_steps` timesteps. The `WorldsConfig` semantics carry over unchanged — only the mechanism changes (no container respawn).
+
+A draft upstream issue/PR will be opened against `seresheim/deepracer-env` referencing this section.
 
 ## Internal layout
 
 ```text
 gym_dr/
-├── app.py             # train(), study(), inspect() — the user-facing call surface
+├── app.py             # train(), study(), inspect() — user-facing call surface
 ├── trainer.py         # orchestrator: run_training() — wraps any Trainer
-├── config.py          # ExperimentConfig and its sub-configs
+├── config.py          # ExperimentConfig + sub-configs (frozen dataclasses)
 ├── action_space.py    # ContinuousActionSpaceConfig, DiscreteActionSpaceConfig
-├── reward.py          # @register("...") factory registry
+├── rewards.py         # example reward functions (plain callables, no registry)
 ├── hpo.py             # Optuna study + objective + worker loop
-├── docker_runner.py   # host-side parallel container spawner
-├── mlflow_utils.py    # MLflow run / nested run helpers
-├── cli.py             # internal: prepare-metadata + inspect (used by run_cpu_training.sh)
+├── docker_runner.py   # host-side container spawners (training chunks + HPO workers)
+├── mlflow_utils.py    # MLflow run + parent-run helpers
 ├── envs/
 │   ├── __init__.py
-│   └── deepracer.py   # deepracer_env_v1 (add _v2, _v3, … here)
+│   └── time_trial.py  # default env factory; add object_avoidance.py etc. here
 └── trainers/
     ├── base.py        # Trainer protocol, TrainingContext, TrainResult
     └── sb3/           # default Sb3Trainer
@@ -187,13 +230,20 @@ gym_dr/
 
 | Topic | File |
 |---|---|
-| `ExperimentConfig` anatomy, reward factories | [docs/configuration.md](docs/configuration.md) |
-| Where artifacts go; per-checkpoint metadata guarantees | [docs/artifact-layout.md](docs/artifact-layout.md) |
-| MLflow params/metrics/artifacts; TensorBoard | [docs/tracking.md](docs/tracking.md) |
-| Optuna HPO + parallel Docker workers | [docs/hpo.md](docs/hpo.md) |
+| `ExperimentConfig` anatomy | [docs/configuration.md](docs/configuration.md) |
+| Per-checkpoint metadata guarantees | [docs/artifact-layout.md](docs/artifact-layout.md) |
+| MLflow + TensorBoard | [docs/tracking.md](docs/tracking.md) |
+| Optuna HPO across parallel containers | [docs/hpo.md](docs/hpo.md) |
 | Algorithm registry + off-policy caveats | [docs/algorithms.md](docs/algorithms.md) |
-| TensorBoard launcher details | [docs/tensorboard.md](docs/tensorboard.md) |
 | Physical-car export caveats | [docs/physical-car-integration-notes.md](docs/physical-car-integration-notes.md) |
+
+## Tests
+
+```bash
+uv run pytest tests/test_smoke.py
+```
+
+The smoke test wires a stub env in place of the upstream sim and exercises the whole orchestrator → `Sb3Trainer` → `TrainingContext` flow, including per-chunk env-var overrides, custom reward archival, `with_overrides` immutability, and the `Trainer` protocol's duck typing.
 
 ## Resume training
 
@@ -201,27 +251,17 @@ Set `training.resume_from` in `app.py` to the **container** path of a previous c
 
 ```python
 training=TrainingConfig(
-    resume_from="/workspace/artifacts/default_4h/latest_model.zip",
-    total_timesteps=1_000_000_000,
-    max_train_seconds=14_400,
+    resume_from="/workspace/artifacts/quick_test_rot0_reinvent_base/latest_model.zip",
+    ...,
 )
 ```
 
-`latest_model.zip` is the safest resume target — it is saved in the `finally` block even when training stops early. The sidecar `latest_model.model_metadata.json` travels with it.
-
-## Detached long run with tmux
-
-```bash
-tmux new-session -s deepracer_train
-./run_cpu_training.sh
-# Detach: Ctrl-b d
-# Reattach: tmux attach -t deepracer_train
-```
+For multi-world rotations this happens automatically between chunks — only set it explicitly to resume a brand-new run from a previous one.
 
 ## Check training status
 
 ```bash
-cat artifacts/<run_name>/training_status.json
-find artifacts/<run_name>/checkpoints -maxdepth 1 -type f | sort
-cat artifacts/<run_name>/run_config.json | jq .
+cat artifacts/<chunk_name>/training_status.json
+find artifacts/<chunk_name>/checkpoints -maxdepth 1 -type f | sort
+cat artifacts/<chunk_name>/run_config.json | jq .
 ```

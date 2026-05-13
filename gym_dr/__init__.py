@@ -1,3 +1,17 @@
+"""Top-level package re-exports.
+
+The user's ``app.py`` typically only needs symbols from here:
+
+    from gym_dr import (
+        ExperimentConfig, Sb3Trainer, TrainingConfig, TrackingConfig,
+        ContinuousActionSpaceConfig, WorldsConfig,
+        time_trial, train, study,
+    )
+    from gym_dr.rewards import center_line   # or write your own
+
+For deeper extension points (custom Trainer, env factory), see
+``gym_dr.trainers.base`` and ``gym_dr.envs``.
+"""
 from gym_dr.action_space import (
     ContinuousActionSpaceConfig,
     DiscreteAction,
@@ -6,13 +20,14 @@ from gym_dr.action_space import (
 from gym_dr.app import inspect, study, train
 from gym_dr.config import (
     ExperimentConfig,
-    RewardConfig,
     TrackingConfig,
     TrainingConfig,
+    WorldsConfig,
     load_config,
     load_search_space,
 )
-from gym_dr.envs import deepracer_env_v1
+from gym_dr.envs import time_trial
+from gym_dr.rewards import center_line, progress_and_speed
 from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
 
 __all__ = [
@@ -20,17 +35,19 @@ __all__ = [
     "DiscreteAction",
     "DiscreteActionSpaceConfig",
     "ExperimentConfig",
-    "RewardConfig",
     "Sb3Trainer",
     "TrackingConfig",
     "Trainer",
     "TrainingConfig",
     "TrainingContext",
     "TrainResult",
-    "deepracer_env_v1",
+    "WorldsConfig",
+    "center_line",
     "inspect",
     "load_config",
     "load_search_space",
+    "progress_and_speed",
     "study",
+    "time_trial",
     "train",
 ]

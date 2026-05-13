@@ -16,13 +16,14 @@ implements the `Trainer` protocol from `gym_dr.trainers.base`.
 """
 from __future__ import annotations
 
+import inspect as py_inspect
 import json
 import os
 import signal
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from gym_dr.action_space import write_model_metadata
 from gym_dr.config import ExperimentConfig
@@ -31,8 +32,22 @@ from gym_dr.mlflow_utils import (
     parent_run_id_from_env,
     start_run,
 )
-from gym_dr.reward import render_reward_source
 from gym_dr.trainers.base import TrainingContext, TrainResult
+
+
+def _render_reward_source(reward_fn: Callable[[dict], float]) -> str:
+    """Best-effort dump of the reward function source for archival.
+
+    Falls back to ``repr(fn)`` for closures/lambdas whose source can't be
+    retrieved (e.g. if the function was defined in a Jupyter cell).
+    """
+    name = getattr(reward_fn, "__qualname__", repr(reward_fn))
+    module = getattr(reward_fn, "__module__", "?")
+    header = f"# Reward function: {module}.{name}\n\n"
+    try:
+        return header + py_inspect.getsource(reward_fn)
+    except (OSError, TypeError):
+        return header + f"# source unavailable; repr = {reward_fn!r}\n"
 
 
 def _project_root() -> Path:
@@ -91,12 +106,9 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
 
     write_model_metadata(run_dir / "model_metadata.json", experiment.action_space)
     write_model_metadata(export_dir / "model_metadata.json", experiment.action_space)
-    (run_dir / "reward_function.py").write_text(
-        render_reward_source(experiment.reward), encoding="utf-8"
-    )
-    (export_dir / "reward_function.py").write_text(
-        render_reward_source(experiment.reward), encoding="utf-8"
-    )
+    reward_src = _render_reward_source(experiment.reward)
+    (run_dir / "reward_function.py").write_text(reward_src, encoding="utf-8")
+    (export_dir / "reward_function.py").write_text(reward_src, encoding="utf-8")
     _write_json(run_dir / "run_config.json", experiment.to_dict())
     _update_status(run_dir, "initialized")
 

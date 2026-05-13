@@ -1,3 +1,3 @@
-from gym_dr.envs.deepracer import deepracer_env_v1
+from gym_dr.envs.time_trial import time_trial
 
-__all__ = ["deepracer_env_v1"]
+__all__ = ["time_trial"]

@@ -4,25 +4,50 @@ Run from the host (spawns parallel Docker workers):
 
     uv run python experiments/hpo_example.py
 
-The same file runs unchanged inside each worker container — `study()` detects
-worker mode via the GYM_DR_WORKER env var and switches to a single-process
-trial loop.
+The same file runs unchanged inside each worker container — ``study()``
+detects worker mode via the ``GYM_DR_WORKER`` env var and switches to a
+single-process trial loop.
+
+The search space mutates ``trainer.kwargs`` via dotted overrides; for the
+reward, it swaps in a freshly-built closure each trial (``make_reward(...)``)
+since the reward is now a plain callable, not a config object.
 """
 from gym_dr import (
     ContinuousActionSpaceConfig,
     ExperimentConfig,
-    RewardConfig,
     Sb3Trainer,
     TrackingConfig,
     TrainingConfig,
-    deepracer_env_v1,
+    WorldsConfig,
     study,
 )
 
+
+def make_center_line(
+    threshold_close: float = 0.1,
+    threshold_mid: float = 0.25,
+    threshold_far: float = 0.5,
+    reward_close: float = 100.0,
+    reward_mid: float = 0.5,
+    reward_far: float = 0.1,
+    reward_off: float = 1e-3,
+):
+    """Parameterized center-line reward; returns a fresh callable per call."""
+    def reward(params: dict) -> float:
+        tw = params["track_width"]
+        d = params["distance_from_center"]
+        if d <= threshold_close * tw:
+            return reward_close
+        if d <= threshold_mid * tw:
+            return reward_mid
+        if d <= threshold_far * tw:
+            return reward_far
+        return reward_off
+    return reward
+
+
 base = ExperimentConfig(
     name="hpo",
-    world_name="reinvent_base",
-    env_factory=deepracer_env_v1,
     trainer=Sb3Trainer(
         name="ppo",
         policy="MultiInputPolicy",
@@ -38,8 +63,9 @@ base = ExperimentConfig(
         },
         device="cpu",
     ),
-    reward=RewardConfig(factory="center_line", params={}),
+    reward=make_center_line(),
     action_space=ContinuousActionSpaceConfig(),
+    worlds=WorldsConfig(names=["reinvent_base"], chunk_steps=100_000, rotations=1),
     training=TrainingConfig(
         total_timesteps=100_000,
         checkpoint_freq=10_000,
@@ -60,15 +86,15 @@ def search_space(trial) -> dict:
         "trainer.kwargs.gamma": trial.suggest_float("gamma", 0.95, 0.999),
         "trainer.kwargs.gae_lambda": trial.suggest_float("gae_lambda", 0.9, 0.99),
         "trainer.kwargs.clip_range": trial.suggest_float("clip_range", 0.1, 0.3),
-        "reward.params.reward_center": trial.suggest_float("reward_center", 10.0, 200.0),
-        "reward.params.reward_mid": trial.suggest_float("reward_mid", 0.1, 5.0),
-        "reward.params.marker_1_frac": trial.suggest_float("marker_1_frac", 0.05, 0.2),
-        "reward.params.marker_2_frac": trial.suggest_float("marker_2_frac", 0.2, 0.4),
-        "reward.params.marker_3_frac": trial.suggest_float("marker_3_frac", 0.4, 0.6),
+        "reward": make_center_line(
+            threshold_close=trial.suggest_float("threshold_close", 0.05, 0.2),
+            reward_close=trial.suggest_float("reward_close", 10.0, 200.0),
+            reward_mid=trial.suggest_float("reward_mid", 0.1, 5.0),
+        ),
     }
 
 
-# alias so the host-side prepare-metadata step can read the action space off this file
+# alias so the host-side metadata pre-gen can read the action space off this file
 experiment = base
 
 

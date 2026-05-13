@@ -38,6 +38,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class TrainResult:
+    """Return value from ``Trainer.fit``.
+
+    ``extra`` is a free-form dict the orchestrator copies into
+    ``training_status.json``. Conventional keys: ``elapsed_seconds``,
+    ``timesteps_completed``, ``time_limit_reached``.
+    """
+
     final_eval_reward: float = float("nan")
     final_model_path: Path | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -82,6 +89,13 @@ class TrainingContext:
         step: int,
         name_prefix: str | None = None,
     ) -> Path:
+        """Save a periodic checkpoint with its DeepRacer metadata sidecar.
+
+        Path is ``<run_dir>/checkpoints/<prefix>_<step>_steps.zip`` with a
+        sibling ``.model_metadata.json``. Cherry-pick a single checkpoint
+        from this dir and the metadata travels with it — required to ship
+        the model to the physical car.
+        """
         from gym_dr.action_space import write_model_metadata
 
         prefix = name_prefix or self.name_prefix
@@ -96,6 +110,7 @@ class TrainingContext:
         return path
 
     def log_metric(self, name: str, value: float, step: int) -> None:
+        """Log a scalar to the active MLflow run if one is open. No-op otherwise."""
         try:
             import mlflow
         except ImportError:
@@ -108,7 +123,13 @@ class TrainingContext:
             return
 
     def report_eval(self, mean_reward: float, step: int) -> None:
-        """Log eval reward to MLflow; raise TrialPruned if Optuna says so."""
+        """Log evaluation reward to MLflow and check Optuna for pruning.
+
+        Always logs ``eval_mean_reward`` to MLflow at ``step``. When the
+        trainer was invoked as part of an HPO trial (``ctx.trial`` is set),
+        this also calls ``trial.report`` and raises ``optuna.TrialPruned``
+        if the pruner decides this trial is unlikely to win.
+        """
         self.log_metric("eval_mean_reward", mean_reward, step)
         if self.trial is not None:
             self.trial.report(float(mean_reward), step)
@@ -120,4 +141,24 @@ class TrainingContext:
 
 @runtime_checkable
 class Trainer(Protocol):
-    def fit(self, env: Any, ctx: TrainingContext) -> TrainResult: ...
+    """Anything with this method shape is a Trainer.
+
+    The contract: take a gym env and a TrainingContext, train, return a
+    TrainResult. The orchestrator handles run-dir setup, MLflow lifecycle,
+    artifact archival, and status-JSON updates around this call.
+    """
+
+    def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
+        """Train against ``env`` until completion or pruning.
+
+        Implementations should:
+
+        - call ``ctx.save_model(fn, name="initial_model")`` before training,
+        - call ``ctx.save_checkpoint(fn, step=N)`` periodically,
+        - call ``ctx.report_eval(mean_reward, step=N)`` after evaluations
+          (this is what feeds MLflow logs and Optuna pruning),
+        - call ``ctx.save_model(fn, name="latest_model")`` in a ``finally``
+          so resume targets exist even on crash,
+        - call ``ctx.save_model(fn, name="final_model")`` on clean exit.
+        """
+        ...

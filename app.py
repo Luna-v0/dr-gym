@@ -1,32 +1,41 @@
-"""Single-training entrypoint. Edit and run.
+"""Single-training entrypoint. Edit this file and run it.
 
-Host (wraps it in Docker):    ./run_cpu_training.sh app.py
-Inside the container:         python app.py
+Usage:
+
+    uv run python app.py            # host-side: orchestrates Docker chunks
+    python app.py                   # inside the container: runs one chunk
+
+The same file runs in both modes; ``gym_dr.train`` checks the
+``GYM_DR_IN_CONTAINER`` env var to decide which side it's on.
 
 Plug-in points
 --------------
-- env_factory:  swap to a new sim version (e.g. `deepracer_env_v2`) or your own
-                callable taking the ExperimentConfig and returning a gym env.
-- trainer:      swap `Sb3Trainer(...)` for any object implementing the
-                `Trainer` protocol — see gym_dr/trainers/base.py.
-- reward:       reference any factory registered in gym_dr/reward.py
-                (add new ones with `@register("my_reward")`).
+- ``env_factory``: swap to a different env version or race type. See
+  ``gym_dr/envs/`` for the time-trial default and add siblings for
+  object_avoidance / head_to_bot / etc.
+- ``trainer``: swap ``Sb3Trainer(...)`` for any object with
+  ``fit(env, ctx) -> TrainResult`` (see ``gym_dr/trainers/base.py``).
+- ``reward``: pass any ``Callable[[dict], float]``. The dict is the upstream
+  DeepRacer reward-params dict; see ``gym_dr/rewards.py`` for the key list
+  and example functions you can use as-is or adapt.
+- ``worlds``: list of world names to rotate through. Single-world =
+  list of one. See ``WorldsConfig`` for chunk_steps / rotations semantics.
 """
 from gym_dr import (
     ContinuousActionSpaceConfig,
     ExperimentConfig,
-    RewardConfig,
     Sb3Trainer,
     TrackingConfig,
     TrainingConfig,
-    deepracer_env_v1,
+    WorldsConfig,
+    center_line,
+    time_trial,
     train,
 )
 
 experiment = ExperimentConfig(
     name="quick_test",
-    world_name="reinvent_base",
-    env_factory=deepracer_env_v1,
+    env_factory=time_trial,
     trainer=Sb3Trainer(
         name="ppo",
         policy="MultiInputPolicy",
@@ -38,12 +47,17 @@ experiment = ExperimentConfig(
         },
         device="cpu",
     ),
-    reward=RewardConfig(factory="center_line", params={}),
+    reward=center_line,
     action_space=ContinuousActionSpaceConfig(
         steering_low=-30.0,
         steering_high=30.0,
         speed_low=0.1,
         speed_high=4.0,
+    ),
+    worlds=WorldsConfig(
+        names=["reinvent_base"],
+        chunk_steps=5_000,
+        rotations=1,
     ),
     training=TrainingConfig(
         total_timesteps=5_000,

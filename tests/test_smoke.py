@@ -1,0 +1,213 @@
+"""End-to-end smoke test of the gym_dr pipeline against a stub env.
+
+Verifies the orchestrator -> Sb3Trainer -> TrainingContext flow without
+requiring Docker or the upstream DeepRacer simapp:
+
+1. Build a tiny stub env that matches DeepRacerEnv's observation+action shape.
+2. Run ``train(experiment)`` in in-container mode (GYM_DR_IN_CONTAINER=1) so
+   the orchestrator skips Docker and directly calls ``run_training``.
+3. Assert every saved ``.zip`` has a ``.model_metadata.json`` sibling, MLflow
+   logged the run, and the multi-world override path resolves through env
+   vars correctly.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import gymnasium as gym
+import numpy as np
+import pytest
+
+from gym_dr import (
+    ContinuousActionSpaceConfig,
+    ExperimentConfig,
+    Sb3Trainer,
+    TrackingConfig,
+    TrainingConfig,
+    WorldsConfig,
+    center_line,
+    train,
+)
+
+
+# --- stub env ---------------------------------------------------------------
+
+
+class StubDeepRacerEnv(gym.Env):
+    """Cheap stand-in for DeepRacerEnv: dict obs, Box action, scripted reward params."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, reward_fn, sensors=None):
+        super().__init__()
+        sensor_name = (sensors or ["FRONT_FACING_CAMERA"])[0]
+        self.observation_space = gym.spaces.Dict({
+            sensor_name: gym.spaces.Box(low=0, high=255, shape=(64, 64, 3), dtype=np.uint8)
+        })
+        self.action_space = gym.spaces.Box(
+            low=np.array([-30.0, 0.1], dtype=np.float32),
+            high=np.array([30.0, 4.0], dtype=np.float32),
+            dtype=np.float32,
+        )
+        self._reward_fn = reward_fn
+        self._sensor_name = sensor_name
+        self._step = 0
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._step = 0
+        return self._obs(), {}
+
+    def step(self, action):
+        self._step += 1
+        params = {
+            "track_width": 1.0,
+            "distance_from_center": float(abs(action[0]) / 30.0 * 0.5),
+            "all_wheels_on_track": True,
+            "progress": min(self._step / 64.0, 1.0),
+            "speed": float(action[1]),
+            "steering_angle": float(action[0]),
+            "is_offtrack": False,
+        }
+        reward = float(self._reward_fn(params))
+        terminated = self._step >= 32
+        truncated = False
+        return self._obs(), reward, terminated, truncated, {}
+
+    def _obs(self):
+        return {
+            self._sensor_name: self.np_random.integers(0, 255, size=(64, 64, 3), dtype=np.uint8)
+        }
+
+
+def stub_env_factory(experiment: ExperimentConfig) -> Any:
+    return StubDeepRacerEnv(
+        reward_fn=experiment.reward,
+        sensors=list(experiment.action_space.sensor),
+    )
+
+
+# --- fixtures ---------------------------------------------------------------
+
+
+@pytest.fixture
+def container_mode(tmp_path, monkeypatch):
+    """Force gym_dr.train into in-container mode and redirect artifacts/MLflow."""
+    monkeypatch.setenv("GYM_DR_IN_CONTAINER", "1")
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.delenv("MLFLOW_PARENT_RUN_ID", raising=False)
+    monkeypatch.delenv("CHUNK_NAME", raising=False)
+    monkeypatch.delenv("RESUME_FROM", raising=False)
+    monkeypatch.delenv("CHUNK_STEPS", raising=False)
+    return tmp_path
+
+
+def _experiment(name: str, tmp_path: Path, *, total_timesteps=200, eval_freq=100) -> ExperimentConfig:
+    return ExperimentConfig(
+        name=name,
+        env_factory=stub_env_factory,
+        trainer=Sb3Trainer(
+            name="ppo",
+            policy="MultiInputPolicy",
+            kwargs={"n_steps": 64, "batch_size": 32, "learning_rate": 3e-4, "ent_coef": 0.01},
+            device="cpu",
+        ),
+        reward=center_line,
+        action_space=ContinuousActionSpaceConfig(),
+        worlds=WorldsConfig(names=["stub_world"], chunk_steps=total_timesteps, rotations=1),
+        training=TrainingConfig(
+            total_timesteps=total_timesteps,
+            checkpoint_freq=total_timesteps,  # one checkpoint at the end
+            eval_freq=eval_freq,
+            n_eval_episodes=1,
+        ),
+        tracking=TrackingConfig(
+            mlflow_tracking_uri=f"file://{tmp_path / 'mlruns'}",
+            mlflow_experiment="smoke",
+        ),
+    )
+
+
+# --- tests ------------------------------------------------------------------
+
+
+def test_train_end_to_end(container_mode):
+    tmp_path = container_mode
+    exp = _experiment("smoke_run", tmp_path)
+    result = train(exp)
+    assert isinstance(result, float), f"expected float eval reward, got {result!r}"
+
+    run_dir = tmp_path / "artifacts" / "smoke_run"
+    assert run_dir.exists(), run_dir
+
+    # Required artifacts
+    for f in ("model_metadata.json", "reward_function.py", "run_config.json", "training_status.json",
+              "initial_model.zip", "latest_model.zip", "final_model.zip"):
+        assert (run_dir / f).exists(), f"missing {f}"
+
+    # Every .zip has a .model_metadata.json sibling
+    zips = list(run_dir.rglob("*.zip"))
+    assert zips, "no .zip artifacts written"
+    for zip_path in zips:
+        sibling = zip_path.with_suffix(".model_metadata.json")
+        assert sibling.exists(), f"missing metadata sibling for {zip_path}"
+
+    # TB events written
+    tb = run_dir / "tensorboard"
+    assert tb.exists() and any(tb.iterdir()), "tensorboard dir empty"
+
+    # MLflow logged something
+    mlruns = tmp_path / "mlruns"
+    assert mlruns.exists(), "mlruns dir not created"
+
+
+def test_per_chunk_env_overrides_apply(container_mode):
+    tmp_path = container_mode
+    os.environ["CHUNK_NAME"] = "override_run"
+    os.environ["CHUNK_STEPS"] = "128"
+    try:
+        exp = _experiment("base_name", tmp_path, total_timesteps=1_000_000)  # would-be huge
+        train(exp)
+    finally:
+        del os.environ["CHUNK_NAME"]
+        del os.environ["CHUNK_STEPS"]
+
+    # CHUNK_NAME overrode the experiment name
+    assert (tmp_path / "artifacts" / "override_run").exists()
+    assert not (tmp_path / "artifacts" / "base_name").exists()
+
+
+def test_custom_reward_archived(container_mode):
+    tmp_path = container_mode
+
+    def my_custom_reward(params: dict) -> float:
+        return 1.23
+
+    exp = _experiment("custom_reward", tmp_path).with_overrides(reward=my_custom_reward)
+    train(exp)
+    src = (tmp_path / "artifacts" / "custom_reward" / "reward_function.py").read_text()
+    assert "my_custom_reward" in src, f"reward archival missing function name; got:\n{src}"
+
+
+def test_with_overrides_does_not_mutate_original():
+    base = ExperimentConfig(
+        name="base",
+        trainer=Sb3Trainer(kwargs={"learning_rate": 3e-4}),
+    )
+    new = base.with_overrides(**{"trainer.kwargs.learning_rate": 1e-5})
+    assert base.trainer.kwargs["learning_rate"] == 3e-4
+    assert new.trainer.kwargs["learning_rate"] == 1e-5
+
+
+def test_trainer_protocol_duck_typed():
+    """Any object with fit(env, ctx) satisfies the protocol — no inheritance."""
+    from gym_dr.trainers.base import Trainer, TrainResult
+
+    class MyTrainer:
+        def fit(self, env, ctx):
+            return TrainResult(final_eval_reward=42.0)
+
+    assert isinstance(MyTrainer(), Trainer)

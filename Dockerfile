@@ -4,7 +4,9 @@ FROM awsdeepracercommunity/deepracer-env:${SIMAPP_TAG}
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml /tmp/pyproject.toml
 RUN cd /tmp && uv pip install --system --no-cache-dir \
-      "stable-baselines3>=2.3" tensorboard "mlflow>=2.10" "optuna>=3.5"
+      "stable-baselines3>=2.3" tensorboard "mlflow>=2.10" "optuna>=3.5" gymnasium
+
+ENV GYM_DR_IN_CONTAINER=1
 
 ENTRYPOINT ["/bin/bash", "-c"]
 CMD ["source /opt/ros/noetic/setup.bash && \

@@ -1,3 +1,15 @@
+"""Host-side Docker spawners.
+
+Two flavours:
+
+- ``spawn_training_chunk`` — blocking, single container, returns rc. Used by
+  ``gym_dr.app._train_host`` to run one ``(rotation, world)`` chunk at a time.
+- ``spawn_workers`` — non-blocking spawn of N parallel containers that all
+  share an Optuna study + MLflow tree. Used by ``gym_dr.app._spawn_workers``
+  for HPO.
+
+Both share ``_build_run_cmd`` for mount + env layout.
+"""
 from __future__ import annotations
 
 import math
@@ -55,6 +67,35 @@ def _build_run_cmd(
     return argv
 
 
+def spawn_training_chunk(
+    image_tag: str,
+    container_name: str,
+    base_env: dict[str, str],
+) -> int:
+    """Run one training chunk in a Docker container; block until exit.
+
+    Returns the container's exit code. SIGINT/SIGTERM in the host process
+    docker-kills the container.
+    """
+    project_dir = _resolve_project_dir()
+    artifacts_dir = _resolve_artifacts_dir(project_dir)
+    argv = _build_run_cmd(image_tag, project_dir, artifacts_dir, container_name, base_env)
+    print(f"[train] spawning {container_name}: {' '.join(argv)}", flush=True)
+
+    proc = subprocess.Popen(argv, stdout=sys.stdout, stderr=sys.stderr)
+
+    def kill(_signum=None, _frame=None) -> None:
+        subprocess.run(["docker", "kill", container_name], check=False, capture_output=True)
+
+    prev_int = signal.signal(signal.SIGINT, kill)
+    prev_term = signal.signal(signal.SIGTERM, kill)
+    try:
+        return proc.wait()
+    finally:
+        signal.signal(signal.SIGINT, prev_int)
+        signal.signal(signal.SIGTERM, prev_term)
+
+
 def spawn_workers(
     image_tag: str,
     study_name: str,
@@ -62,6 +103,7 @@ def spawn_workers(
     n_parallel: int,
     base_env: dict[str, str],
 ) -> int:
+    """Spawn N parallel HPO workers; wait on all; return worst exit code."""
     project_dir = _resolve_project_dir()
     artifacts_dir = _resolve_artifacts_dir(project_dir)
     per_worker = max(1, math.ceil(n_trials / max(1, n_parallel)))

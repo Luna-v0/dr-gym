@@ -1,3 +1,14 @@
+"""Typed configuration dataclasses.
+
+``ExperimentConfig`` is the single object the user composes in ``app.py``.
+It carries everything ``gym_dr.train(experiment)`` needs to run a training:
+which env to build, which trainer to use, which reward function, which
+action space, which world(s), how long to train, and where to log.
+
+All dataclasses are ``frozen=True`` so they hash; HPO mutates them through
+``with_overrides(**flat_dotted_keys)`` which uses ``dataclasses.replace``
+to return a new instance.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -14,13 +25,13 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class RewardConfig:
-    factory: str = "center_line"
-    params: dict[str, float] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class TrainingConfig:
+    """Per-chunk training control.
+
+    A *chunk* is one ``model.learn`` call: one container, one ``WORLD_NAME``.
+    Multi-world runs string several chunks together — see ``WorldsConfig``.
+    """
+
     total_timesteps: int = 500_000
     checkpoint_freq: int = 1_000
     max_train_seconds: int | None = None
@@ -34,16 +45,51 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class TrackingConfig:
+    """MLflow + TensorBoard settings."""
+
     mlflow_tracking_uri: str = "file:///workspace/mlruns"
     mlflow_experiment: str = "gym-dr"
     tensorboard: bool = True
     tags: dict[str, str] = field(default_factory=dict)
 
 
-def _default_env_factory():
-    from gym_dr.envs import deepracer_env_v1
+@dataclass(frozen=True)
+class WorldsConfig:
+    """Worlds to rotate through during a single training run.
 
-    return deepracer_env_v1
+    Multi-world runs use *sequential rotation with shared policy*: the
+    orchestrator trains for ``chunk_steps`` timesteps on the first world,
+    saves a checkpoint, restarts the container with the next ``WORLD_NAME``
+    and ``RESUME_FROM`` pointing at that checkpoint, and continues. The
+    optimizer state and weights persist across switches (off-policy replay
+    buffers, if any, are lost — PPO has none).
+
+    Example::
+
+        worlds = WorldsConfig(
+            names=["reinvent_base", "Bowtie_track"],
+            chunk_steps=20_000,
+            rotations=3,
+        )
+
+    runs 6 chunks of 20k timesteps each:
+    reinvent_base -> Bowtie_track -> reinvent_base -> ... -> Bowtie_track.
+
+    For valid world names see ``.deepracer-env-upstream/tracks.txt``. The
+    current upstream simapp loads the world at container startup and cannot
+    switch at runtime; see the README's "Future work" section for the
+    runtime-switch design.
+    """
+
+    names: list[str] = field(default_factory=lambda: ["reinvent_base"])
+    chunk_steps: int = 50_000
+    rotations: int = 1
+
+
+def _default_env_factory():
+    from gym_dr.envs import time_trial
+
+    return time_trial
 
 
 def _default_trainer():
@@ -52,34 +98,69 @@ def _default_trainer():
     return Sb3Trainer()
 
 
+def _default_reward():
+    from gym_dr.rewards import center_line
+
+    return center_line
+
+
 @dataclass(frozen=True)
 class ExperimentConfig:
+    """A full training experiment definition.
+
+    Compose one of these in your ``app.py``, then call
+    ``gym_dr.train(experiment)``. The orchestrator handles host-vs-container
+    mode dispatch, multi-world rotation, MLflow tracking, and artifact
+    layout — your code only has to declare *what* to train.
+
+    Plug-in points
+    --------------
+    - ``env_factory``: swap the env. Default ``gym_dr.envs.time_trial`` builds
+      a single-agent time-trial ``DeepRacerEnv``. To use a different race
+      type (object avoidance etc.) or a future env version, write a sibling
+      factory under ``gym_dr/envs/`` and reference it here.
+    - ``trainer``: swap the RL algorithm/library. Default
+      ``gym_dr.trainers.Sb3Trainer()`` wraps SB3 PPO/SAC/TD3/A2C/DDPG. Any
+      object with ``fit(env, ctx) -> TrainResult`` satisfies the protocol.
+    - ``reward``: plain ``(params: dict) -> float`` callable. Receives the
+      upstream DeepRacer reward params dict (see ``gym_dr/rewards.py`` for
+      the key list and example functions).
+    - ``action_space``: continuous bounds or a discrete action list.
+    - ``worlds``: list of world names to rotate through.
+    """
+
     name: str
-    world_name: str = "reinvent_base"
     env_factory: Callable[["ExperimentConfig"], Any] = field(default_factory=_default_env_factory)
     trainer: "Trainer" = field(default_factory=_default_trainer)
-    reward: RewardConfig = field(default_factory=RewardConfig)
+    reward: Callable[[dict], float] = field(default_factory=_default_reward)
     action_space: ActionSpaceConfig = field(default_factory=ContinuousActionSpaceConfig)
+    worlds: WorldsConfig = field(default_factory=WorldsConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
     def to_dict(self) -> dict[str, Any]:
-        d = {
+        """Serialize for JSON dump / MLflow logging.
+
+        Callables serialize as ``module.qualname`` strings. The trainer is
+        special-cased: if it's a dataclass we ``asdict()`` it so its kwargs
+        survive the round-trip.
+        """
+        return {
             "name": self.name,
-            "world_name": self.world_name,
             "env_factory": _describe_callable(self.env_factory),
             "trainer": _describe(self.trainer),
-            "reward": dataclasses.asdict(self.reward),
+            "reward": _describe_callable(self.reward),
             "action_space": {
                 **dataclasses.asdict(self.action_space),
                 "action_space_type": self.action_space.action_space_type,
             },
+            "worlds": dataclasses.asdict(self.worlds),
             "training": dataclasses.asdict(self.training),
             "tracking": dataclasses.asdict(self.tracking),
         }
-        return d
 
     def flat_params(self) -> dict[str, Any]:
+        """Flatten ``to_dict()`` into dotted keys for ``mlflow.log_params``."""
         flat: dict[str, Any] = {}
 
         def walk(prefix: str, val: Any) -> None:
@@ -100,6 +181,16 @@ class ExperimentConfig:
         return flat
 
     def with_overrides(self, **overrides: Any) -> ExperimentConfig:
+        """Return a new ExperimentConfig with dotted-key overrides applied.
+
+        Walks dataclass fields and dict-typed fields. Examples::
+
+            cfg.with_overrides(name="trial_3")
+            cfg.with_overrides(**{"trainer.kwargs.learning_rate": 1e-4})
+
+        Used by HPO to mutate a base experiment per trial, and by the
+        in-container chunk dispatcher to apply per-chunk env-var overrides.
+        """
         return _apply_overrides(self, overrides)
 
 
@@ -156,6 +247,10 @@ def _set_nested(d: dict, path: list[str], value: Any) -> None:
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
+    """Import a Python file and return its ``experiment`` module attribute.
+
+    Used by the in-container worker to load the same script the host ran.
+    """
     p = Path(path).resolve()
     if not p.exists():
         raise FileNotFoundError(p)
@@ -173,6 +268,11 @@ def load_config(path: str | Path) -> ExperimentConfig:
 
 
 def load_search_space(path: str | Path):
+    """Import a Python file and return its ``search_space`` module attribute.
+
+    The function should take an Optuna trial and return a flat dotted-key
+    overrides dict consumable by ``ExperimentConfig.with_overrides``.
+    """
     p = Path(path).resolve()
     spec = importlib.util.spec_from_file_location(p.stem, p)
     if spec is None or spec.loader is None:
