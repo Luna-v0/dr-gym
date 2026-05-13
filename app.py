@@ -93,6 +93,10 @@ def search_space(trial) -> dict:
         "trainer.kwargs.gae_lambda":    trial.suggest_float("gae_lambda", 0.9, 0.99),
         "trainer.kwargs.clip_range":    trial.suggest_float("clip_range", 0.1, 0.3),
         "trainer.kwargs.n_epochs":      trial.suggest_int("n_epochs", 4, 12),
+        # Frame stacking — upstream DeepRacerEnv emits single frames; stacking
+        # gives the policy implicit temporal context (velocity / acceleration
+        # cues). 1 = no stacking, 4 is the Atari-DQN classic default.
+        "trainer.frame_stack":          trial.suggest_int("frame_stack", 1, 4),
     }
 
     # --- Neural network architecture ----------------------------------------

@@ -235,6 +235,20 @@ def test_app_py_search_space_applies_to_base():
     assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 
+def test_frame_stack_smoke(container_mode):
+    """Sb3Trainer with frame_stack > 1 wraps the env in VecFrameStack and trains."""
+    tmp_path = container_mode
+    exp = _experiment("frame_stack_check", tmp_path).with_overrides(
+        **{"trainer.frame_stack": 3}
+    )
+    result = train(exp)
+    assert isinstance(result, float)
+    # Standard artifacts still land — VecFrameStack didn't break checkpoint saving.
+    run_dir = tmp_path / "artifacts" / "frame_stack_check"
+    assert (run_dir / "final_model.zip").exists()
+    assert (run_dir / "final_model.model_metadata.json").exists()
+
+
 def test_track_catalog_lookup():
     """ALL_TRACKS exposes every name in TRACKS; display_name maps to labels."""
     from gym_dr import ALL_TRACKS, TRACKS, display_name

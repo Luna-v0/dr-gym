@@ -64,8 +64,22 @@ class Sb3Trainer:
     """Torch device. ``"cpu"`` is the default for the simapp's CPU image.
     ``"cuda"`` requires the GPU base image (``bootstrap.sh -a gpu``)."""
 
+    frame_stack: int = 1
+    """How many consecutive observations to stack along the channel/feature
+    axis before the policy sees them. ``1`` = no stacking (raw env obs).
+    ``> 1`` wraps the env in ``DummyVecEnv`` + ``VecFrameStack(n_stack=...)``
+    so each step's observation includes the last N frames — gives the
+    policy implicit temporal context (velocity, acceleration cues). For
+    Dict obs (DeepRacer's ``FRONT_FACING_CAMERA``) SB3 stacks each key
+    independently along its first axis. Typical sweep range: 1–4."""
+
     def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
         from stable_baselines3.common.callbacks import CallbackList
+        from stable_baselines3.common.vec_env import (
+            DummyVecEnv,
+            VecEnv,
+            VecFrameStack,
+        )
 
         run_dir = ctx.run_dir
         tensorboard_dir = run_dir / "tensorboard"
@@ -74,6 +88,15 @@ class Sb3Trainer:
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         best_model_dir = run_dir / "best_model"
         eval_log_dir = run_dir / "eval"
+
+        # Frame stacking: wrap the env in VecFrameStack(n_stack) when requested.
+        # Upstream DeepRacerEnv emits a single frame per step (verified by
+        # reading deepracer_env/sensors/sensors_rollout.py + utils.py); the
+        # policy gets temporal context only if we stack frames here.
+        if self.frame_stack > 1:
+            if not isinstance(env, VecEnv):
+                env = DummyVecEnv([lambda env=env: env])
+            env = VecFrameStack(env, n_stack=self.frame_stack)
 
         started_at = time.monotonic()
         wall_clock_callback: WallClockLimitCallback | None = None
