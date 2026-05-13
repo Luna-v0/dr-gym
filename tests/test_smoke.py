@@ -202,6 +202,39 @@ def test_with_overrides_does_not_mutate_original():
     assert new.trainer.kwargs["learning_rate"] == 1e-5
 
 
+def test_app_py_search_space_applies_to_base():
+    """app.py defines base + search_space; ensure trial overrides land cleanly,
+    including the policy_kwargs.net_arch sweep."""
+    import importlib.util
+    import optuna
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "app_under_test", Path(__file__).parent.parent / "app.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    study = optuna.create_study(direction="maximize")
+    trial = study.ask()
+    overrides = mod.search_space(trial)
+
+    new_cfg = mod.base.with_overrides(**overrides)
+
+    # PPO hyperparams landed
+    assert "learning_rate" in new_cfg.trainer.kwargs
+    assert "ent_coef" in new_cfg.trainer.kwargs
+    # Architecture override landed
+    pkw = new_cfg.trainer.kwargs.get("policy_kwargs", {})
+    assert "net_arch" in pkw, pkw
+    net_arch = pkw["net_arch"]
+    assert "pi" in net_arch and "vf" in net_arch, net_arch
+    assert len(net_arch["pi"]) >= 1, net_arch
+    assert all(isinstance(w, int) and w > 0 for w in net_arch["pi"]), net_arch
+    # Original base config not mutated
+    assert "policy_kwargs" not in mod.base.trainer.kwargs
+
+
 def test_track_catalog_lookup():
     """ALL_TRACKS exposes every name in TRACKS; display_name maps to labels."""
     from gym_dr import ALL_TRACKS, TRACKS, display_name

@@ -1,25 +1,26 @@
-"""Single-training entrypoint. Edit this file and run it.
+"""HPO entrypoint. Edit and run.
 
 Usage:
 
-    uv run python app.py            # host-side: orchestrates Docker chunks
-    python app.py                   # inside the container: runs one chunk
+    uv run python app.py            # host-side: spawns N parallel worker containers
+    python app.py                   # inside a worker container (auto via GYM_DR_WORKER=1)
 
-The same file runs in both modes; ``gym_dr.train`` checks the
-``GYM_DR_IN_CONTAINER`` env var to decide which side it's on.
+This file defines:
+  - ``base``: the base ``ExperimentConfig`` (everything not swept by HPO).
+  - ``search_space(trial)``: returns a dotted-key overrides dict applied per
+    trial via ``ExperimentConfig.with_overrides(**overrides)``.
 
-Plug-in points
---------------
-- ``env_factory``: swap to a different env version or race type. See
-  ``gym_dr/envs/`` for the time-trial default and add siblings for
-  object_avoidance / head_to_bot / etc.
-- ``trainer``: swap ``Sb3Trainer(...)`` for any object with
-  ``fit(env, ctx) -> TrainResult`` (see ``gym_dr/trainers/base.py``).
-- ``reward``: pass any ``Callable[[dict], float]``. The dict is the upstream
-  DeepRacer reward-params dict; see ``gym_dr/rewards.py`` for the key list
-  and example functions you can use as-is or adapt.
-- ``worlds``: list of world names to rotate through. Single-world =
-  list of one. See ``WorldsConfig`` for chunk_steps / rotations semantics.
+The search includes:
+  - PPO hyperparameters (learning_rate, ent_coef, n_steps, batch_size,
+    gamma, gae_lambda, clip_range, n_epochs).
+  - **Neural network architecture** — `layer_width` × `num_layers`,
+    materialized as ``policy_kwargs.net_arch = dict(pi=..., vf=...)``.
+    TPE explores small-to-large; the range is wide enough that it can
+    walk toward bigger nets as it learns which help.
+
+To turn this into a single (non-HPO) training run, swap the bottom-of-file
+``study(...)`` for ``train(experiment)`` and remove ``search_space``. See
+``experiments/hpo_example.py`` for the canonical reference.
 """
 from gym_dr import (
     ContinuousActionSpaceConfig,
@@ -29,12 +30,13 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     center_line,
+    study,
     time_trial,
-    train,
 )
 
-experiment = ExperimentConfig(
-    name="quick_test",
+
+base = ExperimentConfig(
+    name="hpo",
     env_factory=time_trial,
     trainer=Sb3Trainer(
         name="ppo",
@@ -44,6 +46,10 @@ experiment = ExperimentConfig(
             "batch_size": 64,
             "learning_rate": 3.0e-4,
             "ent_coef": 0.01,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "n_epochs": 10,
         },
         device="cpu",
     ),
@@ -54,21 +60,62 @@ experiment = ExperimentConfig(
         speed_low=0.1,
         speed_high=4.0,
     ),
-    worlds=WorldsConfig(
-        names=["reinvent_base"],
-        chunk_steps=5_000,
-        rotations=1,
-    ),
+    # HPO uses worlds.names[0] for every trial; chunk_steps/rotations are
+    # only consulted by the non-HPO host orchestrator.
+    worlds=WorldsConfig(names=["reinvent_base"]),
     training=TrainingConfig(
-        total_timesteps=5_000,
-        checkpoint_freq=1_000,
+        total_timesteps=20_000,        # per-trial training budget
+        checkpoint_freq=10_000,
+        max_train_seconds=900,         # cap each trial at 15 minutes wall-clock
         eval_freq=2_500,
         n_eval_episodes=2,
-        rtf_override=10.0
+        rtf_override=10,
     ),
-    tracking=TrackingConfig(mlflow_experiment="gym-dr"),
+    tracking=TrackingConfig(mlflow_experiment="gym-dr-hpo"),
 )
 
 
+def search_space(trial) -> dict:
+    """Per-trial overrides applied through ``ExperimentConfig.with_overrides``.
+
+    Dotted keys walk into dataclasses and dicts; ``trainer.kwargs.*`` lands
+    in the SB3 algorithm's constructor, and ``trainer.kwargs.policy_kwargs``
+    replaces SB3's policy kwargs wholesale (including ``net_arch``).
+    """
+    # --- PPO hyperparameters ------------------------------------------------
+    overrides: dict = {
+        "trainer.kwargs.learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
+        "trainer.kwargs.ent_coef":      trial.suggest_float("ent_coef", 1e-4, 1e-1, log=True),
+        "trainer.kwargs.n_steps":       trial.suggest_categorical("n_steps", [128, 256, 512, 1024]),
+        "trainer.kwargs.batch_size":    trial.suggest_categorical("batch_size", [32, 64, 128, 256]),
+        "trainer.kwargs.gamma":         trial.suggest_float("gamma", 0.95, 0.999),
+        "trainer.kwargs.gae_lambda":    trial.suggest_float("gae_lambda", 0.9, 0.99),
+        "trainer.kwargs.clip_range":    trial.suggest_float("clip_range", 0.1, 0.3),
+        "trainer.kwargs.n_epochs":      trial.suggest_int("n_epochs", 4, 12),
+    }
+
+    # --- Neural network architecture ----------------------------------------
+    # Sweep the policy/value-head MLP. `net_arch=dict(pi=..., vf=...)` is the
+    # SB3 PPO convention; passing this through policy_kwargs lets the search
+    # grow the network as wide and deep as the range allows.
+    layer_width = trial.suggest_categorical("layer_width", [64, 128, 256, 512])
+    num_layers = trial.suggest_int("num_layers", 1, 4)
+    overrides["trainer.kwargs.policy_kwargs"] = {
+        "net_arch": dict(pi=[layer_width] * num_layers, vf=[layer_width] * num_layers),
+    }
+    return overrides
+
+
+# Alias so the host-side `prepare-metadata` step (and `inspect`) can read
+# the action space and other shared fields off this file.
+experiment = base
+
+
 if __name__ == "__main__":
-    train(experiment)
+    study(
+        base,
+        search_space,
+        study_name="hpo_app",
+        n_trials=20,
+        n_parallel=1,
+    )
