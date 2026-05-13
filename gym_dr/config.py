@@ -45,9 +45,21 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class TrackingConfig:
-    """MLflow + TensorBoard settings."""
+    """MLflow + TensorBoard settings.
 
-    mlflow_tracking_uri: str = "file:///workspace/mlruns"
+    The default ``mlflow_tracking_uri`` is a **relative** file URI so it
+    resolves consistently on both sides of the host/container boundary:
+
+    - On the host, ``python app.py`` runs from the project dir; ``./mlruns``
+      lands at ``<project_dir>/mlruns``.
+    - Inside the container, the Dockerfile CMD does ``cd /workspace`` first,
+      so ``./mlruns`` resolves to ``/workspace/mlruns`` — the same dir, via
+      the ``-v <project_dir>/mlruns:/workspace/mlruns`` bind mount.
+
+    Override this only if you want a remote MLflow server.
+    """
+
+    mlflow_tracking_uri: str = "file:./mlruns"
     mlflow_experiment: str = "gym-dr"
     tensorboard: bool = True
     tags: dict[str, str] = field(default_factory=dict)
