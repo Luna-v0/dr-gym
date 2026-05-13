@@ -1,9 +1,15 @@
-"""MLflow lifecycle helpers used by ``gym_dr.trainer`` and ``gym_dr.app``.
+"""MLflow lifecycle helpers used by ``gym_dr.trainer``.
 
-``start_run`` opens a (possibly nested) MLflow run, tags it, and logs the
-flat config as params. ``start_parent_run`` is the host-side helper that
-opens a parent run for HPO studies and multi-world rotations; its run_id
-gets passed to children via the ``MLFLOW_PARENT_RUN_ID`` env var.
+Each training chunk opens its own MLflow run via ``start_run``. The host
+orchestrator does NOT pre-open a parent run — that pattern is fragile across
+MLflow versions (host and container often have different MLflow builds, and
+the older one can't always parse run metadata written by the newer one).
+
+Chunks of one multi-world rotation, and trials of one HPO study, are
+grouped via the ``run_group`` tag. The host sets the ``MLFLOW_RUN_GROUP``
+env var when spawning each container; ``start_run`` reads it and tags the
+run. In MLflow UI, filter by ``tags.run_group = "<your_experiment_name>"``
+to see them all together.
 """
 from __future__ import annotations
 
@@ -23,25 +29,29 @@ def _mlflow():
 
 def _tags_for(cfg: ExperimentConfig) -> dict[str, str]:
     trainer_name = getattr(cfg.trainer, "name", type(cfg.trainer).__name__)
-    return {
+    tags: dict[str, str] = {
         "trainer": str(trainer_name),
         "worlds": ",".join(cfg.worlds.names),
         "action_space_type": cfg.action_space.action_space_type,
-        **cfg.tracking.tags,
     }
+    if (group := os.getenv("MLFLOW_RUN_GROUP")):
+        tags["run_group"] = group
+    tags.update(cfg.tracking.tags)
+    return tags
 
 
 @contextmanager
-def start_run(cfg: ExperimentConfig, parent_run_id: str | None = None) -> Iterator[Any]:
-    """Open an MLflow run for one training chunk; nested if a parent id is given."""
+def start_run(cfg: ExperimentConfig) -> Iterator[Any]:
+    """Open an MLflow run for one training chunk.
+
+    Tags it with ``trainer``, ``worlds``, ``action_space_type``, the
+    ``run_group`` env tag (set by the host orchestrator), and any tags from
+    ``cfg.tracking.tags``. Logs the flat config as params.
+    """
     mlflow = _mlflow()
     mlflow.set_tracking_uri(cfg.tracking.mlflow_tracking_uri)
     mlflow.set_experiment(cfg.tracking.mlflow_experiment)
-    nested = parent_run_id is not None
-    parent_arg: dict[str, Any] = {}
-    if parent_run_id is not None:
-        parent_arg["parent_run_id"] = parent_run_id
-    with mlflow.start_run(run_name=cfg.name, nested=nested, **parent_arg) as run:
+    with mlflow.start_run(run_name=cfg.name) as run:
         mlflow.set_tags(_tags_for(cfg))
         mlflow.log_params(_stringify_params(cfg.flat_params()))
         yield run
@@ -63,23 +73,3 @@ def log_run_artifacts(run_dir: Path) -> None:
     if mlflow.active_run() is None:
         return
     mlflow.log_artifacts(str(run_dir))
-
-
-def start_parent_run(cfg: ExperimentConfig, study_name: str) -> str:
-    """Open and immediately close a parent MLflow run; return its run_id.
-
-    Children nest under this parent by passing ``MLFLOW_PARENT_RUN_ID``.
-    Used both by multi-world rotations (one parent per ``train(experiment)``
-    invocation) and by HPO (one parent per study).
-    """
-    mlflow = _mlflow()
-    mlflow.set_tracking_uri(cfg.tracking.mlflow_tracking_uri)
-    mlflow.set_experiment(cfg.tracking.mlflow_experiment)
-    with mlflow.start_run(run_name=f"parent:{study_name}") as run:
-        mlflow.set_tags({"parent": "true", "study_name": study_name, **_tags_for(cfg)})
-        return run.info.run_id
-
-
-def parent_run_id_from_env() -> str | None:
-    rid = os.getenv("MLFLOW_PARENT_RUN_ID")
-    return rid if rid else None

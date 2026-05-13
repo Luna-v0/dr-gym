@@ -211,3 +211,27 @@ def test_trainer_protocol_duck_typed():
             return TrainResult(final_eval_reward=42.0)
 
     assert isinstance(MyTrainer(), Trainer)
+
+
+def test_mlflow_run_group_tag_applied(container_mode, monkeypatch):
+    """MLFLOW_RUN_GROUP env var lands on the chunk's MLflow run as a tag.
+
+    Replaces the old MLFLOW_PARENT_RUN_ID flow (which broke across MLflow
+    versions). The host orchestrator sets this; chunks tag themselves so
+    the UI can group them via `tags.run_group = "<experiment.name>"`.
+    """
+    import mlflow
+
+    tmp_path = container_mode
+    monkeypatch.setenv("MLFLOW_RUN_GROUP", "smoke_group")
+    exp = _experiment("tag_check", tmp_path)
+    train(exp)
+
+    mlflow.set_tracking_uri(f"file://{tmp_path / 'mlruns'}")
+    experiment_handle = mlflow.get_experiment_by_name("smoke")
+    assert experiment_handle is not None
+    runs = mlflow.search_runs(
+        experiment_ids=[experiment_handle.experiment_id],
+        filter_string="tags.run_group = 'smoke_group'",
+    )
+    assert len(runs) == 1, f"expected exactly one run tagged run_group=smoke_group, got {len(runs)}"

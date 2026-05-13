@@ -122,10 +122,17 @@ def _train_one_chunk(experiment: ExperimentConfig) -> float:
 
 
 def _train_host(experiment: ExperimentConfig) -> str | None:
-    """Host side: pre-gen metadata, then docker-run each (rotation, world) chunk in turn."""
+    """Host side: pre-gen metadata, then docker-run each (rotation, world) chunk in turn.
+
+    Chunks are NOT opened under a host-side MLflow parent run — the host
+    and container often run incompatible MLflow versions and the older one
+    can't read run metadata written by the newer one. Each chunk opens its
+    own MLflow run and tags it with ``run_group=<experiment.name>`` so the
+    MLflow UI can group them via a tag filter
+    (``tags.run_group = "quick_test"``).
+    """
     from gym_dr.action_space import write_model_metadata
     from gym_dr.docker_runner import spawn_training_chunk
-    from gym_dr.mlflow_utils import start_parent_run
 
     experiment_path = _resolve_experiment_path()
     project_dir = Path(os.getenv("PROJECT_DIR", Path.cwd())).resolve()
@@ -133,8 +140,6 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
 
     image = os.getenv("IMAGE_TAG", "my-deepracer-project:cpu")
     container_experiment_path = _to_container_path(experiment_path, project_dir)
-
-    parent_run_id = start_parent_run(experiment, study_name=experiment.name)
 
     worlds = experiment.worlds
     chunk_steps = worlds.chunk_steps
@@ -151,7 +156,7 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
                 "WORLD_NAME": world,
                 "CHUNK_NAME": chunk_name,
                 "CHUNK_STEPS": str(chunk_steps),
-                "MLFLOW_PARENT_RUN_ID": parent_run_id,
+                "MLFLOW_RUN_GROUP": experiment.name,
                 "EXPERIMENT_PATH": container_experiment_path,
             }
             if resume_from:
@@ -208,7 +213,6 @@ def _spawn_workers(
 ) -> int:
     from gym_dr.action_space import write_model_metadata
     from gym_dr.docker_runner import spawn_workers
-    from gym_dr.mlflow_utils import start_parent_run
 
     experiment_path = _resolve_experiment_path()
     project_dir = Path(os.getenv("PROJECT_DIR", Path.cwd())).resolve()
@@ -217,13 +221,11 @@ def _spawn_workers(
     storage_url = storage or os.getenv("STUDY_STORAGE", "sqlite:////workspace/optuna.db")
     image = image_tag or os.getenv("IMAGE_TAG", "my-deepracer-project:cpu")
 
-    parent_run_id = start_parent_run(base, study_name)
-
     world = base.worlds.names[0]
     env = {
         "GYM_DR_WORKER": "1",
         "STUDY_STORAGE": storage_url,
-        "MLFLOW_PARENT_RUN_ID": parent_run_id,
+        "MLFLOW_RUN_GROUP": f"study:{study_name}",
         "WORLD_NAME": world,
         "EXPERIMENT_PATH": _to_container_path(experiment_path, project_dir),
         **extra_env,

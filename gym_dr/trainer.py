@@ -27,11 +27,7 @@ from typing import Any, Callable
 
 from gym_dr.action_space import write_model_metadata
 from gym_dr.config import ExperimentConfig
-from gym_dr.mlflow_utils import (
-    log_run_artifacts,
-    parent_run_id_from_env,
-    start_run,
-)
+from gym_dr.mlflow_utils import log_run_artifacts, start_run
 from gym_dr.trainers.base import TrainingContext, TrainResult
 
 
@@ -121,10 +117,9 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     )
 
     started_at = time.monotonic()
-    parent_run_id = parent_run_id_from_env()
     final_eval_reward = float("nan")
 
-    with start_run(experiment, parent_run_id=parent_run_id):
+    with start_run(experiment):
         try:
             result: TrainResult = experiment.trainer.fit(env, ctx)
             final_eval_reward = float(result.final_eval_reward)
