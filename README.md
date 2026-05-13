@@ -1,265 +1,227 @@
 # DeepRacer SB3 Training Environment
 
-This repo trains a Stable-Baselines3 PPO policy against `seresheim/deepracer-env` inside Docker.
+A Python-first, pluggable RL training pipeline for `seresheim/deepracer-env` inside Docker. The user owns a single `app.py` that wires together an env, a trainer, a reward, and an action space. Everything else (artifact layout, MLflow tracking, per-checkpoint DeepRacer metadata sidecars, Optuna HPO across parallel Docker workers, TensorBoard) is provided by `gym_dr` and works for any user-supplied trainer/env that implements the interfaces.
 
-The default workflow is CPU training. It saves checkpoints, final models, run metadata, reward code, model metadata, and optional TensorBoard logs under `artifacts/`.
+```text
+app.py        ←  the user edits this
+   │
+   └──► gym_dr.train(experiment)
+            │
+            ├──► env_factory(experiment)        ←  pluggable env (deepracer_env_v1, _v2, …, or your own)
+            ├──► trainer.fit(env, ctx)          ←  pluggable trainer (Sb3Trainer, or anything you write)
+            └──► MLflow + artifact layout + DeepRacer metadata sidecars (provided)
+```
+
+## Plug-in points
+
+| What | Interface | Default | Where |
+|---|---|---|---|
+| Env | `Callable[[ExperimentConfig], gym.Env]` | `deepracer_env_v1` | `gym_dr/envs/` |
+| Trainer | `Trainer` protocol: `fit(env, ctx) -> TrainResult` | `Sb3Trainer` (SB3 PPO/SAC/TD3/A2C/DDPG) | `gym_dr/trainers/` |
+| Reward | `RewardFactory: (params) -> reward_fn(params) -> float` | `center_line` | `gym_dr/reward.py` |
+| Action space | `ContinuousActionSpaceConfig` \| `DiscreteActionSpaceConfig` | continuous | `gym_dr/action_space.py` |
+| Tracker | hard-wired to MLflow (file store under `./mlruns/`) | — | `gym_dr/mlflow_utils.py` |
 
 ## Prerequisites
 
-- Docker (with the daemon running and `buildx` available)
+- Docker (daemon running, `buildx` available)
 - `git`
+- [`uv`](https://github.com/astral-sh/uv)
 - ~50 GB free in Docker's storage location for the first build
 
-Nothing else is required — `bootstrap.sh` handles the upstream simulator image
-and the project image.
-
-## First-Time Setup
-
-Run once on a fresh machine:
+## First-time setup
 
 ```bash
 cd /mnt/hd/Repos/gym-dr
-./bootstrap.sh
+./bootstrap.sh        # builds upstream simulator image + project image
+uv sync               # host-side Python deps (launcher / HPO orchestrator)
 ```
 
-This will:
+Re-run `./bootstrap.sh` only after editing `pyproject.toml`. `./bootstrap.sh -h` for `-a gpu` etc.
 
-1. Run preflight checks (docker daemon, buildx, disk space)
-2. Clone `github.com/seresheim/deepracer-env` into `.deepracer-env-upstream/` (if missing) and check out the pinned commit
-3. Build the base simulator image `awsdeepracercommunity/deepracer-env:0.1-cpu` (if missing) — this step takes a while
-4. Build the project training image `my-deepracer-project:cpu`
-5. Run an import sanity check against the new image
+## Running a training: `app.py`
 
-The script is idempotent: images and source already present are reused, so
-re-running it is fast.
+The user edits `app.py`. Full file (this is the default `app.py` shipped with the repo):
 
-### Options
+```python
+from gym_dr import (
+    ContinuousActionSpaceConfig, ExperimentConfig, RewardConfig,
+    Sb3Trainer, TrackingConfig, TrainingConfig, deepracer_env_v1, train,
+)
+
+experiment = ExperimentConfig(
+    name="quick_test",
+    world_name="reinvent_base",
+    env_factory=deepracer_env_v1,
+    trainer=Sb3Trainer(
+        name="ppo", policy="MultiInputPolicy",
+        kwargs={"n_steps": 256, "batch_size": 64, "learning_rate": 3e-4, "ent_coef": 0.01},
+    ),
+    reward=RewardConfig(factory="center_line", params={}),
+    action_space=ContinuousActionSpaceConfig(),
+    training=TrainingConfig(total_timesteps=5_000, eval_freq=2_500),
+    tracking=TrackingConfig(),
+)
+
+if __name__ == "__main__":
+    train(experiment)
+```
+
+Launch (Docker is wrapped by the helper script):
+
+```bash
+./run_cpu_training.sh             # uses ./app.py
+./run_cpu_training.sh other_app.py
+```
+
+## Swapping the env
+
+Add a new factory and point `env_factory` at it:
+
+```python
+# gym_dr/envs/deepracer.py  (or your own module)
+def deepracer_env_v2(experiment):
+    from deepracer_env_v2 import DeepRacerEnv as V2
+    from gym_dr.reward import make_reward
+    return V2(reward_fn=make_reward(experiment.reward), world=experiment.world_name)
+```
+
+```python
+# app.py
+from gym_dr.envs import deepracer_env_v2
+experiment = ExperimentConfig(env_factory=deepracer_env_v2, ...)
+```
+
+The factory is any callable `(ExperimentConfig) -> gym.Env`.
+
+## Swapping the trainer
+
+`Sb3Trainer` is the default. To use a different RL library or a hand-rolled loop, implement `Trainer`:
+
+```python
+from gym_dr.trainers.base import Trainer, TrainingContext, TrainResult
+
+class MyTrainer:
+    """Anything with this method shape satisfies gym_dr.Trainer."""
+    def __init__(self, lr: float = 1e-3):
+        self.lr = lr
+
+    def fit(self, env, ctx: TrainingContext) -> TrainResult:
+        # ... your training loop ...
+        for step in range(ctx.training.total_timesteps):
+            ...
+            if step % ctx.training.eval_freq == 0:
+                ctx.report_eval(mean_reward, step=step)            # MLflow log + Optuna prune
+            if step % ctx.training.checkpoint_freq == 0:
+                ctx.save_checkpoint(self._save, step=step)         # zip + metadata sidecar
+        return TrainResult(final_eval_reward=mean_reward)
+```
+
+```python
+# app.py
+experiment = ExperimentConfig(trainer=MyTrainer(lr=5e-4), ...)
+```
+
+The `TrainingContext` (see `gym_dr/trainers/base.py`) gives the trainer the four hooks it needs:
+
+- `ctx.save_model(save_fn, name=...)` — writes `<run_dir>/<name>.zip` + `<name>.model_metadata.json`
+- `ctx.save_checkpoint(save_fn, step=...)` — writes `checkpoints/<prefix>_<step>_steps.zip` + metadata sidecar
+- `ctx.log_metric(name, value, step)` — mirrors to the active MLflow run
+- `ctx.report_eval(mean_reward, step)` — `log_metric("eval_mean_reward", ...)` + Optuna `trial.report` / pruning
+
+The orchestrator (`gym_dr/trainer.py:run_training`) handles everything around `fit`: run-dir setup, `model_metadata.json` generation, MLflow `start_run`, artifact upload at end, and `training_status.json` lifecycle.
+
+## HPO
+
+Same script-per-experiment pattern. Defines a `base` config + a `search_space(trial)` function + `study(...)` at the bottom. The same script runs unchanged inside each worker container — `study()` detects worker mode via `GYM_DR_WORKER`.
+
+```bash
+uv run python experiments/hpo_example.py
+```
+
+Details: [docs/hpo.md](docs/hpo.md).
+
+## Inspect without running
+
+```bash
+uv run python -m gym_dr.cli inspect app.py
+```
+
+## Iterating without rebuilding
+
+Project source is bind-mounted at `/workspace` in the container. Edit and re-run — no `docker build`:
+
+- Hyperparameters / training control / algorithm choice → edit `app.py`
+- Reward shaping → add a factory in `gym_dr/reward.py` and reference it from `app.py`
+- Action space (continuous bounds or discrete action list) → edit `action_space` in `app.py`
+- Custom trainer → drop a file anywhere, import it in `app.py`
+- Custom env → drop a factory in `gym_dr/envs/` or your own module
+
+Rebuild only when `pyproject.toml` changes.
+
+## Internal layout
 
 ```text
-./bootstrap.sh [-a cpu|gpu] [-u UPSTREAM_DIR] [-r UPSTREAM_REF] [-h]
+gym_dr/
+├── app.py             # train(), study(), inspect() — the user-facing call surface
+├── trainer.py         # orchestrator: run_training() — wraps any Trainer
+├── config.py          # ExperimentConfig and its sub-configs
+├── action_space.py    # ContinuousActionSpaceConfig, DiscreteActionSpaceConfig
+├── reward.py          # @register("...") factory registry
+├── hpo.py             # Optuna study + objective + worker loop
+├── docker_runner.py   # host-side parallel container spawner
+├── mlflow_utils.py    # MLflow run / nested run helpers
+├── cli.py             # internal: prepare-metadata + inspect (used by run_cpu_training.sh)
+├── envs/
+│   ├── __init__.py
+│   └── deepracer.py   # deepracer_env_v1 (add _v2, _v3, … here)
+└── trainers/
+    ├── base.py        # Trainer protocol, TrainingContext, TrainResult
+    └── sb3/           # default Sb3Trainer
+        ├── __init__.py
+        ├── algorithms.py
+        └── callbacks.py
 ```
 
-- `-a` — architecture (`cpu` default, `gpu` builds the CUDA base image)
-- `-u` — where to clone/find the upstream source. Useful if you already have a checkout.
-- `-r` — git ref of upstream to pin to. The default pin is a known-good commit.
-- `-h` — show usage.
+## Documentation
 
-Equivalent env vars: `ARCH`, `UPSTREAM_DIR`, `UPSTREAM_REF`.
+| Topic | File |
+|---|---|
+| `ExperimentConfig` anatomy, reward factories | [docs/configuration.md](docs/configuration.md) |
+| Where artifacts go; per-checkpoint metadata guarantees | [docs/artifact-layout.md](docs/artifact-layout.md) |
+| MLflow params/metrics/artifacts; TensorBoard | [docs/tracking.md](docs/tracking.md) |
+| Optuna HPO + parallel Docker workers | [docs/hpo.md](docs/hpo.md) |
+| Algorithm registry + off-policy caveats | [docs/algorithms.md](docs/algorithms.md) |
+| TensorBoard launcher details | [docs/tensorboard.md](docs/tensorboard.md) |
+| Physical-car export caveats | [docs/physical-car-integration-notes.md](docs/physical-car-integration-notes.md) |
 
-### Iterating Without Rebuilding
+## Resume training
 
-The project image contains only third-party dependencies. The project source
-is bind-mounted into the container at run time, so editing these files does
-**not** require rebuilding the image — just re-run `./run_cpu_training.sh`:
+Set `training.resume_from` in `app.py` to the **container** path of a previous checkpoint:
 
-- PPO hyperparameters → edit a YAML in `configs/` (recommended) or pass env vars
-- Reward shaping → edit `reward.py`
-- Action space / sensors → edit `model_metadata.json`
-- Training loop, callbacks, logging → edit `train.py`
+```python
+training=TrainingConfig(
+    resume_from="/workspace/artifacts/default_4h/latest_model.zip",
+    total_timesteps=1_000_000_000,
+    max_train_seconds=14_400,
+)
+```
 
-Only rebuild (`./bootstrap.sh` or `docker build -t my-deepracer-project:cpu .`)
-when `requirements.txt` changes.
+`latest_model.zip` is the safest resume target — it is saved in the `finally` block even when training stops early. The sidecar `latest_model.model_metadata.json` travels with it.
 
-### Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Docker daemon not reachable` | Daemon stopped or you're not in `docker` group | `sudo systemctl start docker`; verify `docker info` works |
-| `docker buildx not available` | Older Docker | Install buildx ([instructions](https://github.com/docker/buildx#installing)) |
-| `Only N GB free` | Disk too full | Free up space; first build needs ~50 GB |
-| Upstream `build.sh` fails on apt-get | Network / apt mirror issue | Retry; consider re-running with `-r <newer_ref>` |
-| Sanity check fails | Bad pip layer | Delete `my-deepracer-project:cpu` and re-run `./bootstrap.sh` |
-
-## Running a Training Run
-
-Every run is described by a YAML in `configs/`. Pass the path as the first
-argument:
+## Detached long run with tmux
 
 ```bash
-cd /mnt/hd/Repos/gym-dr
-./run_cpu_training.sh configs/quick.yaml
-```
-
-To create a new run, copy a config, edit it, and launch:
-
-```bash
-cp configs/quick.yaml configs/my_experiment.yaml
-$EDITOR configs/my_experiment.yaml
-./run_cpu_training.sh configs/my_experiment.yaml
-```
-
-The chosen YAML is copied into the run's artifacts dir as `config.yaml` for
-reproducibility.
-
-### Ad-hoc Overrides
-
-Environment variables override anything in the YAML. Useful for quick tweaks
-without editing the file:
-
-```bash
-TOTAL_TIMESTEPS=100 ./run_cpu_training.sh configs/quick.yaml
-RUN_NAME=my_smoke_run ./run_cpu_training.sh configs/quick.yaml
-```
-
-### Included Configs
-
-- `configs/quick.yaml` — ~5k-timestep smoke test
-- `configs/default.yaml` — 4-hour wall-clock run at high requested RTF
-
-### Output
-
-Artifacts land under `artifacts/<run_name>/`:
-
-```text
-artifacts/<run_name>/config.yaml          # copy of the YAML used
-artifacts/<run_name>/run_config.json      # fully resolved parameters
-artifacts/<run_name>/training_status.json # live status
-artifacts/<run_name>/latest_model.zip
-artifacts/<run_name>/final_model.zip
-artifacts/<run_name>/checkpoints/
-artifacts/<run_name>/tensorboard/
-artifacts/<run_name>/export_bundle/
-```
-
-## Detached Long Run With tmux
-
-For unattended training, run inside `tmux`:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
 tmux new-session -s deepracer_train
+./run_cpu_training.sh
+# Detach: Ctrl-b d
+# Reattach: tmux attach -t deepracer_train
 ```
 
-Then start training:
-
-```bash
-./run_cpu_training.sh configs/default.yaml
-```
-
-Detach from tmux with:
-
-```text
-Ctrl-b d
-```
-
-Check the session later:
-
-```bash
-tmux attach -t deepracer_train
-```
-
-## Check Training Status
-
-Inspect the status JSON:
+## Check training status
 
 ```bash
 cat artifacts/<run_name>/training_status.json
-```
-
-Follow checkpoint creation:
-
-```bash
 find artifacts/<run_name>/checkpoints -maxdepth 1 -type f | sort
+cat artifacts/<run_name>/run_config.json | jq .
 ```
-
-Inspect the fully resolved run configuration:
-
-```bash
-cat artifacts/<run_name>/run_config.json
-```
-
-## Resume Training
-
-Set `resume_from` in a YAML to the **container** path of a previous checkpoint
-(the host `artifacts/` directory is mounted at `/workspace/artifacts` inside
-the container):
-
-```yaml
-# configs/resume.yaml
-run_name: resume_from_default_4h
-resume_from: /workspace/artifacts/default_4h/latest_model.zip
-total_timesteps: 1000000000
-max_train_seconds: 14400
-```
-
-```bash
-./run_cpu_training.sh configs/resume.yaml
-```
-
-## TensorBoard
-
-TensorBoard logs are written to:
-
-```text
-artifacts/<RUN_NAME>/tensorboard/
-```
-
-Launch TensorBoard for one run:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
-RUN_NAME=long_4h_rtf100 ./run_tensorboard.sh
-```
-
-Open:
-
-```text
-http://localhost:6006
-```
-
-Launch TensorBoard for all runs:
-
-```bash
-cd /mnt/hd/Repos/gym-dr
-./run_tensorboard.sh
-```
-
-More details are in [docs/tensorboard.md](docs/tensorboard.md).
-
-## Configuration Reference
-
-Every key below can appear in a YAML config (lowercase) or be passed as an
-environment variable (uppercase). Env vars win when both are set.
-
-| YAML key                | Env var                 | Default          | Notes                                              |
-|-------------------------|-------------------------|------------------|----------------------------------------------------|
-| `run_name`              | `RUN_NAME`              | timestamped      | Output dir under `artifacts/<run_name>/`.          |
-| `world_name`            | `WORLD_NAME`            | `reinvent_base`  | DeepRacer track.                                   |
-| `total_timesteps`       | `TOTAL_TIMESTEPS`       | `500000`         | SB3 timestep target.                               |
-| `max_train_seconds`     | `MAX_TRAIN_SECONDS`     | _none_           | Wall-clock limit, e.g. `14400` for 4h.             |
-| `rtf_override`          | `RTF_OVERRIDE`          | _none_           | Requested Gazebo real-time factor.                 |
-| `checkpoint_freq`       | `CHECKPOINT_FREQ`       | `1000`           | Checkpoint save frequency in timesteps.            |
-| `sb3_device`            | `SB3_DEVICE`            | `cpu`            | `cpu` or `cuda`.                                   |
-| `resume_from`           | `RESUME_FROM`           | _none_           | Container path to a previous `.zip` checkpoint.    |
-| `n_steps`               | `N_STEPS`               | `256`            | PPO rollout steps.                                 |
-| `batch_size`            | `BATCH_SIZE`            | `64`             | PPO batch size.                                    |
-| `learning_rate`         | `LEARNING_RATE`         | `3.0e-4`         | PPO learning rate.                                 |
-| `ent_coef`              | `ENT_COEF`              | `0.01`           | PPO entropy coefficient.                           |
-| `status_update_steps`   | `STATUS_UPDATE_STEPS`   | `1000`           | Min timesteps between status JSON updates.         |
-| `status_update_seconds` | `STATUS_UPDATE_SECONDS` | `30`             | Min wall-clock seconds between status updates.     |
-
-## Model Outputs
-
-Each run directory contains:
-
-```text
-initial_model.zip
-latest_model.zip
-final_model.zip
-checkpoints/
-run_config.json
-training_status.json
-model_metadata.json
-reward_function.py
-export_bundle/
-```
-
-`latest_model.zip` is the safest resume target because it is saved in the `finally` block even when training stops early.
-
-## Physical Car Caveat
-
-The saved `.zip` files are Stable-Baselines3 checkpoints. They are useful for local resume and inference experiments.
-
-They are not AWS DeepRacer-native model export bundles for the stock physical-car upload flow.
-
-The current physical-car direction is documented in [docs/physical-car-integration-notes.md](docs/physical-car-integration-notes.md).

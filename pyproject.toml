@@ -3,12 +3,18 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "my-deepracer-project"
-version = "0.1.0"
-requires-python = ">=3.8"
+name = "gym-dr"
+version = "0.2.0"
+requires-python = ">=3.10"
 dependencies = [
-  "stable-baselines3",
+  "stable-baselines3>=2.3",
+  "tensorboard",
+  "mlflow>=2.10",
+  "optuna>=3.5",
 ]
 
+[project.scripts]
+gym-dr = "gym_dr.cli:main"
+
 [tool.setuptools]
-py-modules = ["train", "reward"]
+packages = ["gym_dr"]
