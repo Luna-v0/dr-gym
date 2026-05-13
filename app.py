@@ -64,6 +64,7 @@ experiment = ExperimentConfig(
         checkpoint_freq=1_000,
         eval_freq=2_500,
         n_eval_episodes=2,
+        rtf_override=10.0
     ),
     tracking=TrackingConfig(mlflow_experiment="gym-dr"),
 )
