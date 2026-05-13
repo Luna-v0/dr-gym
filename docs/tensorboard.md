@@ -35,6 +35,23 @@ SB3 writes the standard scalars:
 - `time/fps`, `time/iterations` — throughput.
 - `eval/mean_reward`, `eval/mean_ep_length` — periodic eval rollouts.
 
+Plus DeepRacer-specific per-episode metrics (averaged per rollout — wired
+automatically via `gym_dr/metrics.py`):
+
+- `dr/ep_reward` — total reward summed over the episode.
+- `dr/ep_length` — episode length in env steps.
+- `dr/ep_offtrack_count` — count of steps where `is_offtrack` was true
+  (or `all_wheels_on_track` was false).
+- `dr/ep_crash_count` — count of steps where `is_crashed` was true.
+- `dr/ep_max_progress` — peak `progress` value reached.
+- `dr/ep_mean_speed` — average `speed` across the episode.
+- `dr/ep_mean_steering_abs` — average `|steering_angle|` (steering effort).
+- `dr/ep_offtrack_rate` — `offtrack_count / steps` (per-step rate).
+
+These cover both training and evaluation episodes — every finalized
+episode contributes, regardless of whether it ran during a training
+rollout or an `EvalCallback` eval.
+
 If you serve the whole `artifacts/` dir, every chunk shows up as a separate run in the left sidebar. Use the regex filter at the top of the sidebar to narrow them down (`^quick_test_` to see only your latest experiment, etc.).
 
 ## Old runs from before the refactor

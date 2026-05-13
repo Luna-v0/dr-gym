@@ -16,6 +16,7 @@ from gym_dr.trainers.sb3.callbacks import (
     CtxCheckpointCallback,
     CtxEvalCallback,
     MlflowMirrorCallback,
+    RewardMetricsCallback,
     StatusJsonCallback,
     WallClockLimitCallback,
     update_training_status,
@@ -117,6 +118,7 @@ class Sb3Trainer:
                 max_train_seconds=ctx.training.max_train_seconds,
             ),
             MlflowMirrorCallback(),
+            RewardMetricsCallback(),
         ]
         if ctx.training.max_train_seconds is not None:
             wall_clock_callback = WallClockLimitCallback(

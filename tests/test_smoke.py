@@ -202,6 +202,17 @@ def test_with_overrides_does_not_mutate_original():
     assert new.trainer.kwargs["learning_rate"] == 1e-5
 
 
+def test_track_catalog_lookup():
+    """ALL_TRACKS exposes every name in TRACKS; display_name maps to labels."""
+    from gym_dr import ALL_TRACKS, TRACKS, display_name
+
+    assert "reinvent_base" in TRACKS
+    assert "reinvent_base" in ALL_TRACKS
+    assert display_name("reinvent_base") == "re:Invent 2018"
+    assert display_name("totally_made_up_world") == "totally_made_up_world"
+    assert set(ALL_TRACKS) == set(TRACKS.keys())
+
+
 def test_trainer_protocol_duck_typed():
     """Any object with fit(env, ctx) satisfies the protocol — no inheritance."""
     from gym_dr.trainers.base import Trainer, TrainResult
@@ -211,6 +222,36 @@ def test_trainer_protocol_duck_typed():
             return TrainResult(final_eval_reward=42.0)
 
     assert isinstance(MyTrainer(), Trainer)
+
+
+def test_reward_metrics_recorded_to_tensorboard(container_mode):
+    """dr/ep_* metrics land as TB scalars + MLflow metrics.
+
+    The stub env reports is_offtrack on every other step (see StubDeepRacerEnv.step)
+    so we should see non-zero offtrack counts.
+    """
+    from tensorboard.backend.event_processing import event_accumulator
+
+    tmp_path = container_mode
+    exp = _experiment("metrics_check", tmp_path)
+    train(exp)
+
+    tb_root = tmp_path / "artifacts" / "metrics_check" / "tensorboard"
+    assert tb_root.exists()
+    sub = next((p for p in tb_root.rglob("events.out.tfevents.*")), None)
+    assert sub is not None, f"no TB event files under {tb_root}"
+    acc = event_accumulator.EventAccumulator(str(sub.parent))
+    acc.Reload()
+    scalar_tags = set(acc.Tags().get("scalars", []))
+    expected = {
+        "dr/ep_reward",
+        "dr/ep_length",
+        "dr/ep_max_progress",
+        "dr/ep_offtrack_count",
+        "dr/ep_mean_speed",
+    }
+    missing = expected - scalar_tags
+    assert not missing, f"missing DR metrics in TB: {missing}; got {sorted(scalar_tags)}"
 
 
 def test_mlflow_run_group_tag_applied(container_mode, monkeypatch):

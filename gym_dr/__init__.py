@@ -28,14 +28,17 @@ from gym_dr.config import (
 )
 from gym_dr.envs import time_trial
 from gym_dr.rewards import center_line, progress_and_speed
+from gym_dr.tracks import ALL_TRACKS, TRACKS, display_name, existing_tracks
 from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
 
 __all__ = [
+    "ALL_TRACKS",
     "ContinuousActionSpaceConfig",
     "DiscreteAction",
     "DiscreteActionSpaceConfig",
     "ExperimentConfig",
     "Sb3Trainer",
+    "TRACKS",
     "TrackingConfig",
     "Trainer",
     "TrainingConfig",
@@ -43,6 +46,8 @@ __all__ = [
     "TrainResult",
     "WorldsConfig",
     "center_line",
+    "display_name",
+    "existing_tracks",
     "inspect",
     "load_config",
     "load_search_space",

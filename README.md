@@ -110,7 +110,19 @@ worlds=WorldsConfig(
 
 This runs **9 chunks** in order `reinvent_base → Bowtie_track → AmericasGeneratedInclStart → reinvent_base → ...`, each 20k timesteps, each resuming from the last. All chunks log under one MLflow parent run (named after `experiment.name`); the UI nests them as children for easy comparison.
 
-Valid world names are in `.deepracer-env-upstream/tracks.txt`.
+Valid world names are in `.deepracer-env-upstream/tracks.txt`. `gym_dr.TRACKS` is a `dict[world_name -> display_name]` covering every known track (re:Invent 2018, A to Z Speedway, Forever Raceway, etc.). To rotate through **every** track in one run:
+
+```python
+from gym_dr import ALL_TRACKS, WorldsConfig, existing_tracks
+
+worlds = WorldsConfig(
+    names=existing_tracks(),   # filters ALL_TRACKS against the simapp image's tracks.txt
+    chunk_steps=10_000,
+    rotations=1,
+)
+```
+
+Use `ALL_TRACKS` directly if you want the unfiltered list; `existing_tracks()` is the safer default — it skips world names whose route file isn't in the simapp image, so the orchestrator doesn't crash on an unknown world halfway through.
 
 ## Plugging in a custom trainer (non-SB3)
 

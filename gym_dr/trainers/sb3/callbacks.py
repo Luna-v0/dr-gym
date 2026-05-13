@@ -164,3 +164,28 @@ class MlflowMirrorCallback(BaseCallback):
                 mlflow.log_metric(key.replace("/", "_"), float(value), step=step)
             except (TypeError, ValueError):
                 continue
+
+
+class RewardMetricsCallback(BaseCallback):
+    """Drain per-episode DeepRacer metrics into the SB3 logger.
+
+    The orchestrator wraps the env so every terminal step's ``info`` dict
+    carries a ``dr_episode`` summary (see ``gym_dr/metrics.py``). This
+    callback inspects ``self.locals["infos"]`` on each step, picks up any
+    finalized summaries, and pushes their keys/values into the logger via
+    ``record_mean`` — they then surface in TensorBoard scalars and (via
+    ``MlflowMirrorCallback``) MLflow metrics, averaged per rollout.
+    """
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos") or []
+        for info in infos:
+            summary = info.get("dr_episode") if isinstance(info, dict) else None
+            if not summary:
+                continue
+            for key, value in summary.items():
+                try:
+                    self.logger.record_mean(key, float(value))
+                except (TypeError, ValueError):
+                    continue
+        return True

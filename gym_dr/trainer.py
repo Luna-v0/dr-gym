@@ -102,13 +102,24 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
 
     write_model_metadata(run_dir / "model_metadata.json", experiment.action_space)
     write_model_metadata(export_dir / "model_metadata.json", experiment.action_space)
+
+    # Archive the user's reward source BEFORE wrapping (the wrapped fn's
+    # getsource would return the metric-recorder boilerplate, not the user's
+    # code).
     reward_src = _render_reward_source(experiment.reward)
     (run_dir / "reward_function.py").write_text(reward_src, encoding="utf-8")
     (export_dir / "reward_function.py").write_text(reward_src, encoding="utf-8")
+
+    # Wrap the reward with a metrics recorder and produce an env wrapper that
+    # finalizes per-episode metrics into info['dr_episode']. See gym_dr/metrics.py.
+    from gym_dr.metrics import install_metrics
+
+    experiment, env_wrapper = install_metrics(experiment)
+
     _write_json(run_dir / "run_config.json", experiment.to_dict())
     _update_status(run_dir, "initialized")
 
-    env = experiment.env_factory(experiment)
+    env = env_wrapper(experiment.env_factory(experiment))
     ctx = TrainingContext(
         run_dir=run_dir,
         action_space=experiment.action_space,
