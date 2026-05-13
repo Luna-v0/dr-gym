@@ -31,6 +31,33 @@ from gym_dr.mlflow_utils import log_run_artifacts, start_run
 from gym_dr.trainers.base import TrainingContext, TrainResult
 
 
+def _apply_global_seed(seed: int) -> None:
+    """Seed Python ``random``, NumPy, and PyTorch globally.
+
+    SB3 also calls ``set_random_seed(seed)`` internally when you pass
+    ``seed=`` to the algorithm constructor — that re-seeds the same three
+    RNGs at PPO build time. We do it here too so any torch-using code that
+    runs *before* PPO is constructed (env wrappers with learned components,
+    user-defined feature extractors, etc.) sees a deterministic RNG.
+    Optuna's sampler is seeded separately via ``make_study(..., seed=...)``.
+    """
+    import random
+
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
 def _render_reward_source(reward_fn: Callable[[dict], float]) -> str:
     """Best-effort dump of the reward function source for archival.
 
@@ -94,6 +121,9 @@ def _update_status(run_dir: Path, status: str, extra: dict[str, Any] | None = No
 def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> float:
     _install_signal_handlers()
 
+    if experiment.seed is not None:
+        _apply_global_seed(experiment.seed)
+
     paths = _build_run_paths(experiment)
     for p in paths.values():
         p.mkdir(parents=True, exist_ok=True)
@@ -125,6 +155,7 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
         action_space=experiment.action_space,
         training=experiment.training,
         trial=trial,
+        seed=experiment.seed,
     )
 
     started_at = time.monotonic()

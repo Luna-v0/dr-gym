@@ -256,6 +256,22 @@ class ExperimentConfig:
     VNC client to ``localhost:5900`` to watch the car drive in real time.
     Adds Gazebo rendering overhead — leave off for long unattended runs."""
 
+    seed: int | None = None
+    """Random seed plumbed everywhere we control:
+
+    - Python ``random``, NumPy, and ``torch.manual_seed`` /
+      ``torch.cuda.manual_seed_all`` are set in the orchestrator before
+      the env is built.
+    - SB3 receives ``seed=`` as a kwarg; internally it re-seeds the same
+      three RNGs and forwards to the first ``env.reset(seed=...)`` for
+      policy + rollout determinism.
+    - Optuna's TPE sampler is seeded as ``base.seed + worker_idx`` so
+      parallel workers don't sample in lockstep.
+
+    ``None`` = nondeterministic. Note Gazebo physics is not deterministic
+    even at a fixed seed — expect some run-to-run variance from the
+    simulator regardless."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON dump / MLflow logging.
 
@@ -275,6 +291,8 @@ class ExperimentConfig:
             "worlds": dataclasses.asdict(self.worlds),
             "training": dataclasses.asdict(self.training),
             "tracking": dataclasses.asdict(self.tracking),
+            "enable_gui": self.enable_gui,
+            "seed": self.seed,
         }
 
     def flat_params(self) -> dict[str, Any]:
