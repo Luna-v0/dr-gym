@@ -35,6 +35,17 @@ from gym_dr import (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Edit these to control the study. They're consumed only by the `study(...)`
+# call at the bottom of the file (host orchestrator); the in-container worker
+# reads N_TRIALS_PER_WORKER from env vars set by the host.
+# --------------------------------------------------------------------------- #
+STUDY_NAME = "hpo_app"
+N_TRIALS = 20
+N_PARALLEL = 1   # number of concurrent Docker workers (each runs its own simapp)
+SEED = 42        # int for reproducibility; None for nondeterministic
+
+
 base = ExperimentConfig(
     name="hpo",
     env_factory=time_trial,
@@ -72,6 +83,7 @@ base = ExperimentConfig(
     ),
     tracking=TrackingConfig(mlflow_experiment="gym-dr-hpo"),
     enable_gui=True,   # watch the car: VNC client -> localhost:5900
+    seed=SEED,
 )
 
 
@@ -119,7 +131,7 @@ if __name__ == "__main__":
     study(
         base,
         search_space,
-        study_name="hpo_app",
-        n_trials=20,
-        n_parallel=1,
+        study_name=STUDY_NAME,
+        n_trials=N_TRIALS,
+        n_parallel=N_PARALLEL,
     )

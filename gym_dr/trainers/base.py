@@ -63,6 +63,9 @@ class TrainingContext:
     training: "TrainingConfig"
     trial: Any | None = None
     name_prefix: str = "checkpoint"
+    seed: int | None = None
+    """Random seed plumbed from ``ExperimentConfig.seed``. Trainers should
+    forward this to their RL library and to ``env.reset(seed=...)``."""
 
     def save_model(self, save_fn: Callable[[Path], None], *, name: str) -> Path:
         """Save a top-level model artifact with its DeepRacer metadata sidecar.

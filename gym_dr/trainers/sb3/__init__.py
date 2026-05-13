@@ -101,6 +101,12 @@ class Sb3Trainer:
         started_at = time.monotonic()
         wall_clock_callback: WallClockLimitCallback | None = None
 
+        # Inject ctx.seed into algorithm kwargs unless the user set their own.
+        # SB3 forwards `seed` to its torch RNG + the first `env.reset(seed=...)`.
+        sb3_kwargs = dict(self.kwargs)
+        if ctx.seed is not None and "seed" not in sb3_kwargs:
+            sb3_kwargs["seed"] = int(ctx.seed)
+
         if ctx.training.resume_from:
             print(f"Resuming model from: {ctx.training.resume_from}", flush=True)
             model = load_model(
@@ -115,7 +121,7 @@ class Sb3Trainer:
                 env,
                 name=self.name,
                 policy=self.policy,
-                kwargs=dict(self.kwargs),
+                kwargs=sb3_kwargs,
                 device=self.device,
                 tensorboard_log=str(tensorboard_dir),
             )
@@ -151,8 +157,13 @@ class Sb3Trainer:
             )
             callbacks.append(wall_clock_callback)
 
+        # Use model.get_env() so the eval env carries the same SB3-applied
+        # wrappers (VecTransposeImage on top of our VecFrameStack/DummyVecEnv).
+        # Without this, SB3 warns "Training and eval env are not of the same
+        # type" because it transposes image obs for the training env but not
+        # for an eval env passed in raw.
         eval_callback = CtxEvalCallback(
-            eval_env=env,
+            eval_env=model.get_env(),
             ctx=ctx,
             best_model_save_path=str(best_model_dir),
             log_path=str(eval_log_dir),

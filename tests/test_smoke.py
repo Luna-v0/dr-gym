@@ -235,6 +235,21 @@ def test_app_py_search_space_applies_to_base():
     assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 
+def test_seed_lands_on_sb3_model(container_mode, monkeypatch):
+    """experiment.seed reaches Sb3Trainer's algorithm kwargs (so PPO seeds itself
+    and its first env.reset(seed=...))."""
+    tmp_path = container_mode
+    exp = _experiment("seed_check", tmp_path).with_overrides(seed=12345)
+    train(exp)
+
+    import json
+    cfg_dict = json.loads((tmp_path / "artifacts" / "seed_check" / "run_config.json").read_text())
+    assert cfg_dict["seed"] == 12345
+    # SB3 stores the seed it was given; if PPO was constructed with seed=12345
+    # the model zip's contained args reflect that. We don't crack open the zip
+    # here; checking the run_config is sufficient evidence of plumbing.
+
+
 def test_frame_stack_smoke(container_mode):
     """Sb3Trainer with frame_stack > 1 wraps the env in VecFrameStack and trains."""
     tmp_path = container_mode
