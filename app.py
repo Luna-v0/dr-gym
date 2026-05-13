@@ -66,9 +66,8 @@ base = ExperimentConfig(
     training=TrainingConfig(
         total_timesteps=20_000,        # per-trial training budget
         checkpoint_freq=10_000,
-        max_train_seconds=900,         # cap each trial at 15 minutes wall-clock
         eval_freq=2_500,
-        n_eval_episodes=2,
+        n_eval_episodes=3,
         rtf_override=10,
     ),
     tracking=TrackingConfig(mlflow_experiment="gym-dr-hpo"),
@@ -96,7 +95,7 @@ def search_space(trial) -> dict:
         # Frame stacking — upstream DeepRacerEnv emits single frames; stacking
         # gives the policy implicit temporal context (velocity / acceleration
         # cues). 1 = no stacking, 4 is the Atari-DQN classic default.
-        "trainer.frame_stack":          trial.suggest_int("frame_stack", 1, 4),
+        "trainer.frame_stack":          trial.suggest_int("frame_stack", 2, 4),
     }
 
     # --- Neural network architecture ----------------------------------------
