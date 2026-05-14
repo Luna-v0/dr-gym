@@ -72,12 +72,17 @@ base = ExperimentConfig(
         speed_high=4.0,
     ),
     # HPO uses worlds.names[0] for every trial; chunk_steps/rotations are
-    # only consulted by the non-HPO host orchestrator.
-    worlds=WorldsConfig(names=["reinvent_base"]),
+    # only consulted by the non-HPO host orchestrator (one chunk per track).
+    worlds=WorldsConfig(names=["reinvent_base"], chunk_steps=100_000),
     training=TrainingConfig(
-        total_timesteps=20_000,        # per-trial training budget
-        checkpoint_freq=10_000,
-        eval_freq=2_500,
+        # Per-trial budget in HPO mode; per-track budget == chunk_steps when
+        # this experiment is run as a multi-world training instead. Bumped
+        # from 20k — single-layer-free bigger nets need more steps to show
+        # their ceiling, and the MedianPruner still kills weak trials early
+        # so the wall-clock cost is mostly paid by the good trials.
+        total_timesteps=100_000,
+        checkpoint_freq=25_000,
+        eval_freq=10_000,
         n_eval_episodes=3,
         rtf_override=10,
     ),
@@ -111,13 +116,20 @@ def search_space(trial) -> dict:
     }
 
     # --- Neural network architecture ----------------------------------------
-    # Sweep the policy/value-head MLP. `net_arch=dict(pi=..., vf=...)` is the
-    # SB3 PPO convention; passing this through policy_kwargs lets the search
-    # grow the network as wide and deep as the range allows.
-    layer_width = trial.suggest_categorical("layer_width", [64, 128, 256, 512])
-    num_layers = trial.suggest_int("num_layers", 1, 4)
+    # Two parts of the net are swept here:
+    #   * net_arch       — the MLP *head* after the CNN. `dict(pi=..., vf=...)`
+    #                      is the SB3 PPO convention.
+    #   * cnn_output_dim — the width of the CNN feature embedding that feeds
+    #                      that head. This is the easy "bigger CNN" lever
+    #                      (no custom extractor class needed); see
+    #                      gym_dr/extractors.py for the deeper-CNN option.
+    # num_layers starts at 2 — single-layer heads underfit the camera input.
+    layer_width = trial.suggest_categorical("layer_width", [128, 256, 512])
+    num_layers = trial.suggest_int("num_layers", 2, 5)
+    cnn_output_dim = trial.suggest_categorical("cnn_output_dim", [256, 512, 1024])
     overrides["trainer.kwargs.policy_kwargs"] = {
         "net_arch": dict(pi=[layer_width] * num_layers, vf=[layer_width] * num_layers),
+        "features_extractor_kwargs": {"cnn_output_dim": cnn_output_dim},
     }
     return overrides
 

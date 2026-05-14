@@ -174,6 +174,62 @@ experiment = ExperimentConfig(env_factory=object_avoidance, ...)
 
 The upstream `RaceType` enum has `TIME_TRIAL` (current default), `OBJECT_AVOIDANCE`, `HEAD_TO_BOT`, `HEAD_TO_MODEL`, `F1` — `.deepracer-env-upstream/deepracer_env/reset/constants.py:21`.
 
+## Customizing the network
+
+The policy net has two parts, configured separately:
+
+- **MLP head** — `policy_kwargs["net_arch"]`. `dict(pi=[...], vf=[...])` sets the
+  policy/value head layer widths. `app.py`'s search space sweeps depth (2–5
+  layers) and width (128/256/512).
+- **CNN feature extractor** — runs *before* the head, turns the camera image
+  into a feature vector. SB3 picks `CombinedExtractor` automatically for
+  dict-image obs. Three levers, cheapest first:
+  1. **Embedding width** — `policy_kwargs["features_extractor_kwargs"]["cnn_output_dim"]`.
+     `app.py`'s search space sweeps this (256/512/1024). No custom class needed.
+  2. **Conv stack shape** — channels, **kernel size**, **stride** per layer —
+     via `gym_dr.extractors.DeepImageExtractor`:
+     ```python
+     from gym_dr.extractors import DeepImageExtractor
+     trainer = Sb3Trainer(
+         name="ppo", policy="MultiInputPolicy",
+         kwargs={"policy_kwargs": {
+             "features_extractor_class": DeepImageExtractor,
+             "features_extractor_kwargs": {
+                 "features_dim": 512,
+                 # (out_channels, kernel_size, stride) per conv layer:
+                 "conv_layers": ((32, 8, 4), (64, 4, 2), (64, 3, 1),
+                                 (128, 3, 1), (128, 3, 1)),
+             },
+             "net_arch": dict(pi=[256, 256], vf=[256, 256]),
+         }},
+     )
+     ```
+     Stride-1 layers auto-pad to preserve spatial size, so you can stack depth
+     freely. `features_extractor_class` is a *class*, not sweepable by Optuna —
+     pick it in the base config; sweep `conv_layers` / `features_dim` inside
+     `search_space(trial)` instead.
+  3. **Anything else** — subclass `BaseFeaturesExtractor` yourself.
+
+See `gym_dr/extractors.py` for the full docstring.
+
+## Evaluate (view mode)
+
+Watch a trained model drive — no training, just inference + a live Gazebo GUI:
+
+```bash
+uv run python scripts/evaluate.py \
+    --model artifacts/hpo_trial_15/final_model.zip \
+    --app app.py \
+    --episodes 5
+```
+
+Then point a VNC client at `localhost:5900`. Per-step and per-episode detail
+(`dr/ep_reward`, `dr/ep_max_progress`, off-track count, mean speed, …) streams
+to your terminal. `--loop` runs forever until Ctrl-C; `--world <name>`
+overrides the track. Frame stacking is auto-detected from the model's
+`run_config.json` so a `frame_stack>1` model evaluates with the matching
+observation shape.
+
 ## HPO
 
 `experiments/hpo_example.py` is a runnable script. Defines a `base` config + a `search_space(trial)` function + `study(...)` at the bottom. Run it from the host:
