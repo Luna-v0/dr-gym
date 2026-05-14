@@ -79,7 +79,7 @@ base = ExperimentConfig(
     ),
     # HPO uses worlds.names[0] for every trial; chunk_steps/rotations are
     # only consulted by the non-HPO host orchestrator.
-    worlds=WorldsConfig(names='Oval_track'),
+    worlds=WorldsConfig(names=['Oval_track']),
     training=TrainingConfig(
         total_timesteps=500_000,       # per-trial training budget — bumped from
                                        # 20k; DeepRacer policies climb slowly and

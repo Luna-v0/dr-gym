@@ -169,6 +169,14 @@ class WorldsConfig:
     list of 3 worlds, 3 chunks run total (3 × 1 = 3). With ``rotations=2``
     and 3 worlds, 6 chunks (3 × 2)."""
 
+    def __post_init__(self) -> None:
+        # Guard the easy mistake: `names="Oval_track"` (a bare str) instead
+        # of `names=["Oval_track"]`. A str is iterable, so it would silently
+        # "work" — iterating into single characters as world names. Coerce
+        # it to a one-element list so the intent (one world) is honoured.
+        if isinstance(self.names, str):
+            object.__setattr__(self, "names", [self.names])
+
 
 def _default_env_factory():
     from gym_dr.envs import time_trial

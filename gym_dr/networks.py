@@ -33,10 +33,14 @@ independent towers.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Tuple
 
 # (filters, kernel_size, stride) per conv layer.
-ConvSpec = tuple[tuple[int, int, int], ...]
+# NB: typing.Tuple, not the builtin `tuple[...]` — this is a *runtime* alias
+# assignment (not an annotation, so `from __future__ import annotations`
+# doesn't defer it), and builtin generics aren't subscriptable until
+# Python 3.9. The simapp container runs Python 3.8.
+ConvSpec = Tuple[Tuple[int, int, int], ...]
 
 DEEPRACER_CONV_PRESETS: dict[str, ConvSpec] = {
     "shallow": ((32, 8, 4), (64, 4, 2), (64, 3, 1)),

@@ -202,6 +202,16 @@ def test_with_overrides_does_not_mutate_original():
     assert new.trainer.kwargs["learning_rate"] == 1e-5
 
 
+def test_worlds_config_coerces_bare_string():
+    """WorldsConfig(names="X") is an easy mistake — a bare str is iterable and
+    would silently train on single characters. It must coerce to ["X"]."""
+    from gym_dr import WorldsConfig
+
+    assert WorldsConfig(names="Oval_track").names == ["Oval_track"]
+    # A real list passes through untouched.
+    assert WorldsConfig(names=["A", "B"]).names == ["A", "B"]
+
+
 def test_app_py_search_space_applies_to_base():
     """app.py defines base + search_space; ensure trial overrides land cleanly:
     the AWS-faithful policy_kwargs (separate towers, raw 0-255), the swept CNN
