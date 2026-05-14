@@ -42,8 +42,8 @@ from gym_dr import (
 # reads N_TRIALS_PER_WORKER from env vars set by the host.
 # --------------------------------------------------------------------------- #
 STUDY_NAME = "time_trail_exp1"
-N_TRIALS = 20
-N_PARALLEL = 4   # number of concurrent Docker workers (each runs its own simapp)
+N_TRIALS = 30
+N_PARALLEL = 2   # number of concurrent Docker workers (each runs its own simapp)
 SEED = 42        # int for reproducibility; None for nondeterministic
 
 
