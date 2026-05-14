@@ -162,7 +162,7 @@ def sb3_to_onnx(
     import torch
     import torch.nn as nn
 
-    model = _load_sb3_zip(sb3_zip)
+    model = load_sb3_zip(sb3_zip)
     policy = model.policy
     policy.eval()
 
@@ -275,7 +275,7 @@ def _metadata_from_app(app_path: Path) -> bytes:
 # Internal: SB3 glue
 # --------------------------------------------------------------------------- #
 
-def _load_sb3_zip(path: Path):
+def load_sb3_zip(path: Path):
     """Load an SB3 ``.zip`` by trying each known algorithm class."""
     from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
 
