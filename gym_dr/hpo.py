@@ -13,16 +13,35 @@ def _optuna():
     return optuna
 
 
-def make_study(study_name: str, storage: str, eval_freq: int, seed: int | None = None):
+# Pruner leniency. Trials need a real chance to learn before they're
+# eligible for pruning — DeepRacer policies climb slowly. n_warmup_steps is
+# expressed as a *fraction of the per-trial timestep budget*: no trial is
+# pruned until it's at least PRUNE_WARMUP_FRAC of the way through training.
+PRUNE_WARMUP_FRAC = 0.5
+PRUNE_STARTUP_TRIALS = 8  # no pruning at all until this many trials finish
+
+
+def make_study(
+    study_name: str,
+    storage: str,
+    total_timesteps: int,
+    seed: int | None = None,
+):
     """Open (or join) a SQLite-backed Optuna study.
+
+    The ``MedianPruner`` is deliberately lenient: ``n_warmup_steps`` is
+    ``PRUNE_WARMUP_FRAC`` of ``total_timesteps`` (the per-trial budget), so a
+    trial trains at least halfway before it can be killed, and
+    ``n_startup_trials`` requires several full trials before pruning starts
+    at all. DeepRacer reward curves are slow to separate — pruning early
+    throws away trials that would have caught up.
 
     ``seed`` seeds the TPE sampler so two workers given the same seed
     explore in lockstep — useful for reproducibility but undesirable for
-    parallel search. The orchestrator currently passes the same seed to all
-    workers; if that bites, set ``seed=None`` per worker (or offset by
-    ``WORKER_INDEX``).
+    parallel search. The orchestrator offsets it by ``WORKER_INDEX``.
     """
     optuna = _optuna()
+    warmup_steps = max(1, int(total_timesteps * PRUNE_WARMUP_FRAC))
     return optuna.create_study(
         study_name=study_name,
         storage=storage,
@@ -30,8 +49,8 @@ def make_study(study_name: str, storage: str, eval_freq: int, seed: int | None =
         direction="maximize",
         sampler=optuna.samplers.TPESampler(multivariate=True, seed=seed),
         pruner=optuna.pruners.MedianPruner(
-            n_startup_trials=5,
-            n_warmup_steps=max(1, eval_freq) * 3,
+            n_startup_trials=PRUNE_STARTUP_TRIALS,
+            n_warmup_steps=warmup_steps,
         ),
     )
 
@@ -65,7 +84,9 @@ def run_worker(
     base_seed = base_cfg.seed
     worker_idx = int(os.getenv("WORKER_INDEX", "0"))
     sampler_seed = None if base_seed is None else int(base_seed) + worker_idx
-    study = make_study(study_name, storage, base_cfg.training.eval_freq, seed=sampler_seed)
+    study = make_study(
+        study_name, storage, base_cfg.training.total_timesteps, seed=sampler_seed
+    )
     objective = build_objective(base_cfg, search_space)
     study.optimize(objective, n_trials=n_trials, catch=(Exception,))
 

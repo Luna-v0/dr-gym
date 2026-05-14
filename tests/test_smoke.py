@@ -203,8 +203,9 @@ def test_with_overrides_does_not_mutate_original():
 
 
 def test_app_py_search_space_applies_to_base():
-    """app.py defines base + search_space; ensure trial overrides land cleanly,
-    including BOTH the MLP-head (net_arch) and the CNN (features_extractor) sweep."""
+    """app.py defines base + search_space; ensure trial overrides land cleanly:
+    the AWS-faithful policy_kwargs (separate towers, raw 0-255), the swept CNN
+    conv stack, and independently-sized pi/vf FC heads."""
     import importlib.util
     import optuna
     from pathlib import Path
@@ -216,36 +217,41 @@ def test_app_py_search_space_applies_to_base():
     spec.loader.exec_module(mod)
 
     study = optuna.create_study(direction="maximize")
-    trial = study.ask()
-    overrides = mod.search_space(trial)
+    # Sample a few trials so the conditional "custom" CNN branch is exercised.
+    for _ in range(8):
+        trial = study.ask()
+        overrides = mod.search_space(trial)
+        new_cfg = mod.base.with_overrides(**overrides)
 
-    new_cfg = mod.base.with_overrides(**overrides)
+        # PPO hyperparams landed.
+        assert "learning_rate" in new_cfg.trainer.kwargs
+        assert "ent_coef" in new_cfg.trainer.kwargs
 
-    # PPO hyperparams landed
-    assert "learning_rate" in new_cfg.trainer.kwargs
-    assert "ent_coef" in new_cfg.trainer.kwargs
+        pkw = new_cfg.trainer.kwargs["policy_kwargs"]
 
-    pkw = new_cfg.trainer.kwargs.get("policy_kwargs", {})
+        # AWS-faithful policy flags.
+        assert pkw["share_features_extractor"] is False, pkw
+        assert pkw["normalize_images"] is False, pkw
 
-    # MLP head: net_arch with >=2 layers (no single-layer heads).
-    net_arch = pkw["net_arch"]
-    assert "pi" in net_arch and "vf" in net_arch, net_arch
-    assert len(net_arch["pi"]) >= 2, net_arch
-    assert all(isinstance(w, int) and w > 0 for w in net_arch["pi"]), net_arch
+        # CNN extractor: the DeepRacerCNN class + a valid conv stack.
+        from gym_dr.networks import DeepRacerCNN
 
-    # CNN: a custom feature extractor class + a swept conv stack.
-    from gym_dr.extractors import DeepImageExtractor
+        assert pkw["features_extractor_class"] is DeepRacerCNN, pkw
+        fe_kwargs = pkw["features_extractor_kwargs"]
+        assert fe_kwargs["features_dim"] in (256, 512, 1024)
+        conv_layers = fe_kwargs["conv_layers"]
+        assert len(conv_layers) >= 3, conv_layers
+        for filters, kernel, stride in conv_layers:
+            assert filters > 0 and kernel > 0 and stride > 0, conv_layers
 
-    assert pkw.get("features_extractor_class") is DeepImageExtractor, pkw
-    fe_kwargs = pkw["features_extractor_kwargs"]
-    assert fe_kwargs["features_dim"] in (256, 512, 1024)
-    conv_layers = fe_kwargs["conv_layers"]
-    assert len(conv_layers) >= 3, conv_layers
-    for out_ch, kernel, stride in conv_layers:
-        assert out_ch > 0 and kernel > 0 and stride > 0, conv_layers
+        # pi / vf heads exist and can be sized independently.
+        net_arch = pkw["net_arch"]
+        assert "pi" in net_arch and "vf" in net_arch, net_arch
+        assert all(w > 0 for w in net_arch["pi"]), net_arch
+        assert all(w > 0 for w in net_arch["vf"]), net_arch
 
-    # Original base config not mutated.
-    assert "policy_kwargs" not in mod.base.trainer.kwargs
+        # Original base config not mutated.
+        assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 
 def test_device_gpu_alias_falls_back_too(container_mode, capfd):

@@ -176,41 +176,46 @@ The upstream `RaceType` enum has `TIME_TRIAL` (current default), `OBJECT_AVOIDAN
 
 ## Customizing the network
 
-The policy net has two parts, configured separately:
+The policy/value network is modelled on the **real AWS DeepRacer** training
+stack (the RoboMaker `markov` bundle + Intel rl-coach), not the community sim:
 
-- **MLP head** — `policy_kwargs["net_arch"]`. `dict(pi=[...], vf=[...])` sets the
-  policy/value head layer widths. `app.py`'s search space sweeps depth (2–5
-  layers) and width (128/256/512).
-- **CNN feature extractor** — runs *before* the head, turns the camera image
-  into a feature vector. SB3 picks `CombinedExtractor` automatically for
-  dict-image obs. Three levers, cheapest first:
-  1. **Embedding width** — `policy_kwargs["features_extractor_kwargs"]["cnn_output_dim"]`.
-     `app.py`'s search space sweeps this (256/512/1024). No custom class needed.
-  2. **Conv stack shape** — channels, **kernel size**, **stride** per layer —
-     via `gym_dr.extractors.DeepImageExtractor`:
-     ```python
-     from gym_dr.extractors import DeepImageExtractor
-     trainer = Sb3Trainer(
-         name="ppo", policy="MultiInputPolicy",
-         kwargs={"policy_kwargs": {
-             "features_extractor_class": DeepImageExtractor,
-             "features_extractor_kwargs": {
-                 "features_dim": 512,
-                 # (out_channels, kernel_size, stride) per conv layer:
-                 "conv_layers": ((32, 8, 4), (64, 4, 2), (64, 3, 1),
-                                 (128, 3, 1), (128, 3, 1)),
-             },
-             "net_arch": dict(pi=[256, 256], vf=[256, 256]),
-         }},
-     )
-     ```
-     Stride-1 layers auto-pad to preserve spatial size, so you can stack depth
-     freely. `features_extractor_class` is a *class*, not sweepable by Optuna —
-     pick it in the base config; sweep `conv_layers` / `features_dim` inside
-     `search_space(trial)` instead.
-  3. **Anything else** — subclass `BaseFeaturesExtractor` yourself.
+- **Separate actor & critic towers.** AWS's clipped PPO sets
+  `use_separate_networks_per_head=True` — the policy and value each get their
+  *own* CNN + FC tower (same spec, independent weights). We reproduce this
+  with `policy_kwargs["share_features_extractor"] = False`, so SB3 builds two
+  `DeepRacerCNN` instances.
+- **Raw 0–255 input.** AWS feeds the model un-normalized grayscale uint8 — no
+  `/255`. `policy_kwargs["normalize_images"] = False` matches that, and
+  `time_trial`'s grayscale wrapper makes the obs single-channel (so the ONNX
+  export's input matches what the car feeds).
+- **CNN tower** — `gym_dr.networks.DeepRacerCNN`, a config-driven conv stack.
+  Use a named DeepRacer preset or a custom stack:
+  ```python
+  from gym_dr.networks import DEEPRACER_CONV_PRESETS, DeepRacerCNN
+  trainer = Sb3Trainer(
+      name="ppo", policy="MultiInputPolicy",
+      kwargs={"policy_kwargs": {
+          "share_features_extractor": False,
+          "normalize_images": False,
+          "features_extractor_class": DeepRacerCNN,
+          "features_extractor_kwargs": {
+              # a named arch: "shallow" / "standard" / "deep"
+              "conv_layers": DEEPRACER_CONV_PRESETS["shallow"],
+              # ...or a custom ((filters, kernel, stride), ...) stack
+              "features_dim": 512,
+          },
+          "net_arch": dict(pi=[512], vf=[512]),  # per-head FC, sized independently
+      }},
+  )
+  ```
+- **FC middleware** — `policy_kwargs["net_arch"] = dict(pi=[...], vf=[...])`,
+  the layers between each CNN tower and its head. Sized independently per head.
 
-See `gym_dr/extractors.py` for the full docstring.
+`app.py`'s `search_space` sweeps all of it: the CNN arch (a named preset *or*
+a sampled custom conv stack), `features_dim`, and the pi/vf FC widths/depths
+(up to 1024 wide). `features_extractor_class` is a class — not Optuna-sweepable
+— so it's fixed; everything inside `features_extractor_kwargs` + `net_arch`
+varies. See `gym_dr/networks.py` for the AWS grounding and the preset specs.
 
 ## Evaluate (view mode)
 

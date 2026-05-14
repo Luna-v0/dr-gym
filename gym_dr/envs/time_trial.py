@@ -37,12 +37,20 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
       - ``experiment.action_space.sensor`` (list of sensor names) for the
         observation dict keys.
 
+    The camera observation is converted to single-channel grayscale via
+    ``GrayscaleObs`` — matching what the physical AWS DeepRacer car feeds its
+    model (its inference node does BGR->gray before the network). This keeps
+    frame-stacking and the ONNX/.pb export consistently grayscale.
+
     Returns a ``gymnasium.Env`` instance. The caller is responsible for
     closing it.
     """
     from deepracer_env.environments.deepracer_env import DeepRacerEnv
 
-    return DeepRacerEnv(
+    from gym_dr.envs.wrappers import GrayscaleObs
+
+    env = DeepRacerEnv(
         reward_fn=experiment.reward,
         sensors=list(experiment.action_space.sensor),
     )
+    return GrayscaleObs(env)
