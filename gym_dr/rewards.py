@@ -25,13 +25,23 @@ def center_line(params: dict) -> float:
     """
     track_width = params["track_width"]
     distance_from_center = params["distance_from_center"]
+    all_wheels_on_track = params["all_wheels_on_track"]
+
+    if not all_wheels_on_track: return 0.1
+
+
+
     if distance_from_center <= 0.1 * track_width:
-        return 100.0
+        multiplier = 100.0
     if distance_from_center <= 0.25 * track_width:
-        return 0.5
+        multiplier =  0.5
     if distance_from_center <= 0.5 * track_width:
-        return 0.1
-    return 1e-3
+        multiplier = 0.1
+    else:
+        multiplier = 0.01
+    
+    return float(max(params["progress"] * params["speed"] / 4.0, 1e-3)) * multiplier
+
 
 
 def progress_and_speed(params: dict) -> float:

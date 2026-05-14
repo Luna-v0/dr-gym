@@ -29,9 +29,10 @@ from gym_dr import (
     TrackingConfig,
     TrainingConfig,
     WorldsConfig,
-    center_line,
     study,
     time_trial,
+    center_line,
+    existing_tracks
 )
 
 
@@ -40,9 +41,9 @@ from gym_dr import (
 # call at the bottom of the file (host orchestrator); the in-container worker
 # reads N_TRIALS_PER_WORKER from env vars set by the host.
 # --------------------------------------------------------------------------- #
-STUDY_NAME = "hpo_app"
+STUDY_NAME = "time_trail_exp1"
 N_TRIALS = 20
-N_PARALLEL = 1   # number of concurrent Docker workers (each runs its own simapp)
+N_PARALLEL = 4   # number of concurrent Docker workers (each runs its own simapp)
 SEED = 42        # int for reproducibility; None for nondeterministic
 
 
@@ -62,7 +63,7 @@ base = ExperimentConfig(
             "clip_range": 0.2,
             "n_epochs": 10,
         },
-        device="cpu",
+        device="cuda",
     ),
     reward=center_line,
     action_space=ContinuousActionSpaceConfig(
@@ -73,7 +74,7 @@ base = ExperimentConfig(
     ),
     # HPO uses worlds.names[0] for every trial; chunk_steps/rotations are
     # only consulted by the non-HPO host orchestrator.
-    worlds=WorldsConfig(names=["reinvent_base"]),
+    worlds=WorldsConfig(names=existing_tracks()),
     training=TrainingConfig(
         total_timesteps=20_000,        # per-trial training budget
         checkpoint_freq=10_000,
@@ -81,9 +82,10 @@ base = ExperimentConfig(
         n_eval_episodes=3,
         rtf_override=10,
     ),
-    tracking=TrackingConfig(mlflow_experiment="gym-dr-hpo"),
-    enable_gui=True,   # watch the car: VNC client -> localhost:5900
+    tracking=TrackingConfig(mlflow_experiment="time_trial_1"),
+    #enable_gui=True,   # watch the car: VNC client -> localhost:5900
     seed=SEED,
+    use_gpu=True
 )
 
 
@@ -94,6 +96,7 @@ def search_space(trial) -> dict:
     in the SB3 algorithm's constructor, and ``trainer.kwargs.policy_kwargs``
     replaces SB3's policy kwargs wholesale (including ``net_arch``).
     """
+    num_layers = trial.suggest_int("num_layers", 1, 4)
     # --- PPO hyperparameters ------------------------------------------------
     overrides: dict = {
         "trainer.kwargs.learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
