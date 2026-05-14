@@ -204,7 +204,7 @@ def test_with_overrides_does_not_mutate_original():
 
 def test_app_py_search_space_applies_to_base():
     """app.py defines base + search_space; ensure trial overrides land cleanly,
-    including the policy_kwargs.net_arch sweep."""
+    including BOTH the MLP-head (net_arch) and the CNN (features_extractor) sweep."""
     import importlib.util
     import optuna
     from pathlib import Path
@@ -224,14 +224,27 @@ def test_app_py_search_space_applies_to_base():
     # PPO hyperparams landed
     assert "learning_rate" in new_cfg.trainer.kwargs
     assert "ent_coef" in new_cfg.trainer.kwargs
-    # Architecture override landed
+
     pkw = new_cfg.trainer.kwargs.get("policy_kwargs", {})
-    assert "net_arch" in pkw, pkw
+
+    # MLP head: net_arch with >=2 layers (no single-layer heads).
     net_arch = pkw["net_arch"]
     assert "pi" in net_arch and "vf" in net_arch, net_arch
-    assert len(net_arch["pi"]) >= 1, net_arch
+    assert len(net_arch["pi"]) >= 2, net_arch
     assert all(isinstance(w, int) and w > 0 for w in net_arch["pi"]), net_arch
-    # Original base config not mutated
+
+    # CNN: a custom feature extractor class + a swept conv stack.
+    from gym_dr.extractors import DeepImageExtractor
+
+    assert pkw.get("features_extractor_class") is DeepImageExtractor, pkw
+    fe_kwargs = pkw["features_extractor_kwargs"]
+    assert fe_kwargs["features_dim"] in (256, 512, 1024)
+    conv_layers = fe_kwargs["conv_layers"]
+    assert len(conv_layers) >= 3, conv_layers
+    for out_ch, kernel, stride in conv_layers:
+        assert out_ch > 0 and kernel > 0 and stride > 0, conv_layers
+
+    # Original base config not mutated.
     assert "policy_kwargs" not in mod.base.trainer.kwargs
 
 

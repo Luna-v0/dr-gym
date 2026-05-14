@@ -174,9 +174,17 @@ def _build_deep_image_extractor():
     return DeepImageExtractor
 
 
-# Public name — resolved on first access so importing this module doesn't
-# pull in torch unless the extractor is actually used.
+# Public name — built on first access so importing this module doesn't pull
+# in torch unless the extractor is actually used. Memoized so every access
+# returns the *same* class object: SB3 and HPO compare it by identity, and
+# rebuilding it per-access would break `is` checks and bloat memory.
+_DEEP_IMAGE_EXTRACTOR: Any = None
+
+
 def __getattr__(name: str) -> Any:
     if name == "DeepImageExtractor":
-        return _build_deep_image_extractor()
+        global _DEEP_IMAGE_EXTRACTOR
+        if _DEEP_IMAGE_EXTRACTOR is None:
+            _DEEP_IMAGE_EXTRACTOR = _build_deep_image_extractor()
+        return _DEEP_IMAGE_EXTRACTOR
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -34,6 +34,7 @@ from gym_dr import (
     center_line,
     existing_tracks
 )
+from gym_dr.extractors import DeepImageExtractor
 
 
 # --------------------------------------------------------------------------- #
@@ -89,14 +90,37 @@ base = ExperimentConfig(
 )
 
 
+def _sample_conv_layers(trial) -> tuple:
+    """Sample a DeepImageExtractor conv stack for this trial.
+
+    Shape: two strided *downsampling* layers (big kernels) followed by
+    `cnn_refine_layers` stride-1 *refinement* layers. DeepImageExtractor
+    auto-pads stride-1 layers so they don't collapse the feature map — so
+    depth and kernel size sweep freely. Each entry is
+    ``(out_channels, kernel_size, stride)``.
+    """
+    base_ch = trial.suggest_categorical("cnn_base_channels", [16, 32, 64])
+    first_kernel = trial.suggest_categorical("cnn_first_kernel", [5, 8])
+    refine_kernel = trial.suggest_categorical("cnn_refine_kernel", [3, 5])
+    n_refine = trial.suggest_int("cnn_refine_layers", 1, 3)
+
+    layers = [
+        (base_ch, first_kernel, 4),   # downsample
+        (base_ch * 2, 4, 2),          # downsample
+    ]
+    for _ in range(n_refine):         # stride-1 refinement (channels held)
+        layers.append((base_ch * 2, refine_kernel, 1))
+    return tuple(layers)
+
+
 def search_space(trial) -> dict:
     """Per-trial overrides applied through ``ExperimentConfig.with_overrides``.
 
     Dotted keys walk into dataclasses and dicts; ``trainer.kwargs.*`` lands
     in the SB3 algorithm's constructor, and ``trainer.kwargs.policy_kwargs``
-    replaces SB3's policy kwargs wholesale (including ``net_arch``).
+    replaces SB3's policy kwargs wholesale (so the dict below must carry
+    *everything* the policy needs — net_arch AND the CNN extractor).
     """
-    num_layers = trial.suggest_int("num_layers", 1, 4)
     # --- PPO hyperparameters ------------------------------------------------
     overrides: dict = {
         "trainer.kwargs.learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
@@ -113,14 +137,25 @@ def search_space(trial) -> dict:
         "trainer.frame_stack":          trial.suggest_int("frame_stack", 2, 4),
     }
 
-    # --- Neural network architecture ----------------------------------------
-    # Sweep the policy/value-head MLP. `net_arch=dict(pi=..., vf=...)` is the
-    # SB3 PPO convention; passing this through policy_kwargs lets the search
-    # grow the network as wide and deep as the range allows.
-    layer_width = trial.suggest_categorical("layer_width", [64, 128, 256, 512])
-    num_layers = trial.suggest_int("num_layers", 1, 4)
+    # --- MLP head (the layers *after* the CNN) ------------------------------
+    layer_width = trial.suggest_categorical("layer_width", [128, 256, 512])
+    num_layers = trial.suggest_int("num_layers", 2, 5)
+
+    # --- CNN feature extractor (the layers *before* the head) ---------------
+    # Uses gym_dr.extractors.DeepImageExtractor so the conv stack itself is
+    # swept — depth, channel width, kernel sizes — plus the output embedding
+    # dim. (`features_extractor_class` is a class, not Optuna-sweepable, so
+    # it's fixed here; everything *inside* features_extractor_kwargs varies.)
+    conv_layers = _sample_conv_layers(trial)
+    features_dim = trial.suggest_categorical("cnn_features_dim", [256, 512, 1024])
+
     overrides["trainer.kwargs.policy_kwargs"] = {
         "net_arch": dict(pi=[layer_width] * num_layers, vf=[layer_width] * num_layers),
+        "features_extractor_class": DeepImageExtractor,
+        "features_extractor_kwargs": {
+            "features_dim": features_dim,
+            "conv_layers": conv_layers,
+        },
     }
     return overrides
 
