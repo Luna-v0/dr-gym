@@ -46,7 +46,7 @@ from gym_dr.networks import DEEPRACER_CONV_PRESETS, DeepRacerCNN
 # call at the bottom of the file (host orchestrator); the in-container worker
 # reads N_TRIALS_PER_WORKER from env vars set by the host.
 # --------------------------------------------------------------------------- #
-STUDY_NAME = "time_trail_exp1"
+STUDY_NAME = "time_trail_exp2"
 N_TRIALS = 30
 N_PARALLEL = 2   # number of concurrent Docker workers (each runs its own simapp)
 SEED = 42        # int for reproducibility; None for nondeterministic
@@ -79,7 +79,7 @@ base = ExperimentConfig(
     ),
     # HPO uses worlds.names[0] for every trial; chunk_steps/rotations are
     # only consulted by the non-HPO host orchestrator.
-    worlds=WorldsConfig(names=existing_tracks()),
+    worlds=WorldsConfig(names='Oval_track'),
     training=TrainingConfig(
         total_timesteps=500_000,       # per-trial training budget — bumped from
                                        # 20k; DeepRacer policies climb slowly and
@@ -91,7 +91,7 @@ base = ExperimentConfig(
         n_eval_episodes=3,
         rtf_override=10,
     ),
-    tracking=TrackingConfig(mlflow_experiment="time_trial_1"),
+    tracking=TrackingConfig(mlflow_experiment="time_trial_2"),
     #enable_gui=True,   # watch the car: VNC client -> localhost:5900
     seed=SEED,
     use_gpu=True
