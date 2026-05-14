@@ -104,3 +104,40 @@ def test_frame_stack_override_arg(container_mode):
     # Passing the matching value explicitly should work identically.
     summaries = run_evaluation(exp, model, n_episodes=1, frame_stack=2, step_log_every=10)
     assert len(summaries) == 1
+
+
+def test_experiment_reconstructed_from_run_config(container_mode):
+    """experiment_for_model() rebuilds the experiment from run_config.json —
+    no --app needed — and the reconstructed experiment evaluates correctly."""
+    from gym_dr.evaluate import experiment_for_model
+
+    tmp_path = container_mode
+    exp = _experiment("eval_reconstruct", tmp_path, frame_stack=2)
+    train(exp)
+    model = tmp_path / "artifacts" / "eval_reconstruct" / "final_model.zip"
+
+    # No app_path — reconstruct from the sibling run_config.json.
+    reconstructed = experiment_for_model(model, app_path=None)
+    # env_factory + reward resolved back to the live callables.
+    assert reconstructed.env_factory is exp.env_factory
+    assert reconstructed.reward is exp.reward
+    # action space rebuilt as the right dataclass.
+    assert type(reconstructed.action_space) is type(exp.action_space)
+    # frame_stack carried through so the obs shape matches the trained policy.
+    assert reconstructed.trainer.frame_stack == 2
+
+    summaries = run_evaluation(reconstructed, model, n_episodes=1, step_log_every=10)
+    assert len(summaries) == 1
+    assert "dr/ep_reward" in summaries[0]
+
+
+def test_missing_run_config_requires_app(container_mode, tmp_path):
+    """With neither --app nor a run_config.json, the error names the fix."""
+    import pytest
+
+    from gym_dr.evaluate import experiment_for_model
+
+    orphan = tmp_path / "orphan_model.zip"
+    orphan.write_bytes(b"not really a model")
+    with pytest.raises(FileNotFoundError, match="run_config.json"):
+        experiment_for_model(orphan, app_path=None)

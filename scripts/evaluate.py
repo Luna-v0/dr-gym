@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 """Run a trained model in the simulator in "view mode" — watch + inspect.
 
-Host usage:
+Host usage (the common case — no --app needed):
 
     uv run python scripts/evaluate.py \\
-        --model artifacts/hpo_trial_15/final_model.zip \\
-        --app app.py \\
-        --episodes 5
+        --model artifacts/hpo_trial_15/final_model.zip
 
 Then attach a VNC client to localhost:5900 to watch the car; per-step and
-per-episode detail streams to this terminal. ``--loop`` runs forever until
-you Ctrl-C.
+per-episode detail streams to this terminal.
 
-This is a host/container dispatcher (same pattern as ``app.py``):
-- On the host: pre-generates ``model_metadata.json``, then ``docker run``s
-  the sim container with the GUI on, ``EXPERIMENT_PATH`` pointed back at
-  this script, and the model/app/episode count passed via env vars.
-- Inside the container (``GYM_DR_IN_CONTAINER=1``): loads the experiment +
-  model and calls ``gym_dr.evaluate.run_evaluation``.
+Flags:
+  --episodes N   how many episodes to run (default 5; ignored with --loop)
+  --loop         run forever until Ctrl-C — just watch
+  --world W      override the track (default: the model's training world)
+  --rtf R        simulator real-time factor. Default 1.0 = human-watchable
+                 real time. The training config's rtf_override (often 10+
+                 for fast HPO) is *not* inherited — eval is for watching.
+  --app PATH     optional. By default the experiment is reconstructed from
+                 the model's sibling run_config.json. Pass --app only if the
+                 run used callables defined inline in the script (which
+                 can't be resolved by import path).
 
-Frame stacking is auto-detected from the model's ``run_config.json``.
+Host/container dispatch (same pattern as app.py):
+- On the host: reconstructs the experiment, pre-generates model_metadata.json,
+  ``docker run``s the sim container with the GUI on and EXPERIMENT_PATH
+  pointed back at this script.
+- Inside the container (GYM_DR_IN_CONTAINER=1): loads the experiment + model
+  and calls gym_dr.evaluate.run_evaluation.
+
+Frame stacking is auto-detected from the model's run_config.json.
 """
 from __future__ import annotations
 
@@ -35,31 +44,33 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _container_mode() -> int:
-    """Inside the sim container: load experiment + model, run evaluation."""
-    from gym_dr.config import load_config
-    from gym_dr.evaluate import run_evaluation
+    """Inside the sim container: resolve experiment + model, run evaluation."""
+    from gym_dr.evaluate import experiment_for_model, run_evaluation
 
-    model = os.environ["GYM_DR_EVAL_MODEL"]
-    app = os.environ["GYM_DR_EVAL_APP"]
+    model = Path(os.environ["GYM_DR_EVAL_MODEL"])
+    app = os.environ.get("GYM_DR_EVAL_APP") or None
     episodes = int(os.environ.get("GYM_DR_EVAL_EPISODES", "5"))
     loop = os.environ.get("GYM_DR_EVAL_LOOP", "0") == "1"
 
-    experiment = load_config(app)
-    run_evaluation(experiment, Path(model), n_episodes=episodes, loop=loop)
+    experiment = experiment_for_model(model, Path(app) if app else None)
+    run_evaluation(experiment, model, n_episodes=episodes, loop=loop)
     return 0
 
 
 def _host_mode(args: argparse.Namespace) -> int:
-    """On the host: pre-gen metadata, spawn the GUI sim container."""
+    """On the host: reconstruct experiment, pre-gen metadata, spawn the GUI sim."""
     from gym_dr.action_space import write_model_metadata
-    from gym_dr.config import load_config
     from gym_dr.docker_runner import spawn_training_chunk
+    from gym_dr.evaluate import experiment_for_model
 
     project_dir = Path(os.getenv("PROJECT_DIR", _PROJECT_ROOT)).resolve()
     model_path = args.model.resolve()
-    app_path = args.app.resolve()
+    app_path = args.app.resolve() if args.app else None
 
-    for label, p in (("model", model_path), ("app", app_path)):
+    to_check = [("model", model_path)]
+    if app_path is not None:
+        to_check.append(("app", app_path))
+    for label, p in to_check:
         if not p.exists():
             print(f"{label} not found: {p}", file=sys.stderr)
             return 1
@@ -70,7 +81,7 @@ def _host_mode(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
 
-    experiment = load_config(app_path)
+    experiment = experiment_for_model(model_path, app_path)
     write_model_metadata(project_dir / "model_metadata.json", experiment.action_space)
 
     world = args.world or experiment.worlds.names[0]
@@ -85,14 +96,16 @@ def _host_mode(args: argparse.Namespace) -> int:
         "ENABLE_GUI": "True",
         "EXPERIMENT_PATH": to_container(Path(__file__).resolve()),
         "GYM_DR_EVAL_MODEL": to_container(model_path),
-        "GYM_DR_EVAL_APP": to_container(app_path),
         "GYM_DR_EVAL_EPISODES": str(args.episodes),
         "GYM_DR_EVAL_LOOP": "1" if args.loop else "0",
+        # Real-time factor: default 1.0 (human-watchable). The training
+        # config's rtf_override is deliberately NOT inherited.
+        "RTF_OVERRIDE": str(args.rtf),
     }
-    if experiment.training.rtf_override is not None:
-        env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
+    if app_path is not None:
+        env["GYM_DR_EVAL_APP"] = to_container(app_path)
 
-    print(f"[evaluate] world={world!r} model={model_path.name}  "
+    print(f"[evaluate] world={world!r} model={model_path.name}  rtf={args.rtf}  "
           f"GUI on vnc://localhost:5900", flush=True)
     return spawn_training_chunk(
         image_tag=image,
@@ -114,14 +127,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--model", required=True, type=Path,
                         help="Path to a trained SB3 .zip (inside the project dir)")
-    parser.add_argument("--app", type=Path, default=Path("app.py"),
-                        help="Experiment script for env/reward/action-space (default app.py)")
+    parser.add_argument("--app", type=Path, default=None,
+                        help="Optional experiment script override. Default: reconstruct "
+                             "from the model's sibling run_config.json")
     parser.add_argument("--episodes", type=int, default=5,
                         help="Episodes to run (default 5; ignored with --loop)")
     parser.add_argument("--loop", action="store_true",
                         help="Run forever until Ctrl-C — just watch")
     parser.add_argument("--world", default=None,
-                        help="Override WORLD_NAME (default: experiment.worlds.names[0])")
+                        help="Override WORLD_NAME (default: the model's training world)")
+    parser.add_argument("--rtf", type=float, default=1.0,
+                        help="Simulator real-time factor (default 1.0 = human-watchable)")
     args = parser.parse_args(argv)
     return _host_mode(args)
 

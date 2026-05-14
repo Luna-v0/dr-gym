@@ -217,18 +217,27 @@ See `gym_dr/extractors.py` for the full docstring.
 Watch a trained model drive — no training, just inference + a live Gazebo GUI:
 
 ```bash
-uv run python scripts/evaluate.py \
-    --model artifacts/hpo_trial_15/final_model.zip \
-    --app app.py \
-    --episodes 5
+uv run python scripts/evaluate.py --model artifacts/hpo_trial_15/final_model.zip
 ```
 
 Then point a VNC client at `localhost:5900`. Per-step and per-episode detail
 (`dr/ep_reward`, `dr/ep_max_progress`, off-track count, mean speed, …) streams
-to your terminal. `--loop` runs forever until Ctrl-C; `--world <name>`
-overrides the track. Frame stacking is auto-detected from the model's
-`run_config.json` so a `frame_stack>1` model evaluates with the matching
-observation shape.
+to your terminal.
+
+No `--app` needed — the experiment (env factory, reward, action space,
+frame-stack depth) is reconstructed from the model's sibling
+`run_config.json`, which every training run writes. Pass `--app <path>` only
+if the run used callables defined *inline* in the experiment script.
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--episodes N` | `5` | episodes to run (ignored with `--loop`) |
+| `--loop` | off | run forever until Ctrl-C — just watch |
+| `--world W` | model's training world | evaluate on a different track |
+| `--rtf R` | `1.0` | simulator real-time factor — `1.0` is human-watchable real time; the training config's `rtf_override` (often 10+ for fast HPO) is **not** inherited |
+| `--app PATH` | reconstruct from `run_config.json` | experiment-script override for inline-callable runs |
 
 ## HPO
 

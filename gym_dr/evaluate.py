@@ -19,6 +19,7 @@ the policy was trained on. Pass ``frame_stack=`` explicitly to override.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 from pathlib import Path
@@ -27,6 +28,113 @@ from typing import Any
 from gym_dr.config import ExperimentConfig
 
 LOG = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Resolving which experiment to evaluate a model under
+# --------------------------------------------------------------------------- #
+
+def experiment_for_model(
+    model_path: Path, app_path: Path | None = None
+) -> ExperimentConfig:
+    """Get the ``ExperimentConfig`` to evaluate ``model_path`` under.
+
+    - With ``app_path``: load that experiment script directly. Use this if
+      the run used callables defined *inline* in the script (which can't be
+      resolved by import path).
+    - Without ``app_path`` (the default): reconstruct from the model's
+      sibling ``run_config.json``. Every training run writes that file with
+      the fully-resolved config — ``env_factory`` and ``reward`` as dotted
+      import paths, ``action_space`` as a dict, ``trainer.frame_stack`` —
+      which is everything evaluation needs. No ``app.py`` required.
+    """
+    model_path = Path(model_path)
+    if app_path is not None:
+        from gym_dr.config import load_config
+
+        return load_config(app_path)
+
+    run_config = _load_run_config(model_path)
+    if run_config is None:
+        raise FileNotFoundError(
+            f"no run_config.json next to {model_path} — pass --app explicitly "
+            "(the run dir is the directory the model .zip lives in)"
+        )
+    return _reconstruct_experiment(run_config)
+
+
+def _load_run_config(model_path: Path) -> dict | None:
+    for cfg_path in (
+        model_path.parent / "run_config.json",
+        model_path.with_suffix(".run_config.json"),
+    ):
+        if cfg_path.exists():
+            try:
+                return json.loads(cfg_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                return None
+    return None
+
+
+def _resolve_dotted(path: str):
+    """Resolve a ``module.qualname`` string back to the live object."""
+    module_path, _, attr = path.rpartition(".")
+    if not module_path:
+        raise ValueError(f"not a dotted import path: {path!r}")
+    mod = importlib.import_module(module_path)
+    obj = mod
+    for part in attr.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+def _rebuild_action_space(d: dict):
+    from gym_dr.action_space import (
+        ContinuousActionSpaceConfig,
+        DiscreteAction,
+        DiscreteActionSpaceConfig,
+    )
+
+    d = dict(d)
+    kind = d.pop("action_space_type", "continuous")
+    if kind == "discrete":
+        actions = [DiscreteAction(**a) for a in d.pop("actions", [])]
+        return DiscreteActionSpaceConfig(actions=actions, **d)
+    d.pop("actions", None)  # not present for continuous, but be defensive
+    return ContinuousActionSpaceConfig(**d)
+
+
+def _reconstruct_experiment(rc: dict) -> ExperimentConfig:
+    """Rebuild a minimal ExperimentConfig from a serialized run_config.json.
+
+    Only the pieces evaluation actually needs are reconstructed faithfully:
+    ``env_factory`` + ``reward`` (resolved from their dotted paths),
+    ``action_space``, and ``trainer.frame_stack``. The policy architecture
+    is *not* rebuilt from config — SB3 loads it whole from the model zip —
+    so ``trainer.kwargs`` is intentionally left empty.
+    """
+    from gym_dr.config import TrackingConfig, TrainingConfig, WorldsConfig
+    from gym_dr.trainers import Sb3Trainer
+
+    trainer_d = rc.get("trainer", {}) or {}
+    worlds_d = rc.get("worlds", {}) or {}
+
+    return ExperimentConfig(
+        name=rc.get("name", "eval"),
+        env_factory=_resolve_dotted(rc["env_factory"]),
+        reward=_resolve_dotted(rc["reward"]),
+        action_space=_rebuild_action_space(rc["action_space"]),
+        # Only frame_stack matters for eval — SB3 loads the policy from the
+        # zip, so the rest of the trainer config is irrelevant here.
+        trainer=Sb3Trainer(frame_stack=int(trainer_d.get("frame_stack", 1))),
+        worlds=WorldsConfig(
+            names=list(worlds_d.get("names", ["reinvent_base"])),
+            chunk_steps=int(worlds_d.get("chunk_steps", 50_000)),
+            rotations=int(worlds_d.get("rotations", 1)),
+        ),
+        training=TrainingConfig(),
+        tracking=TrackingConfig(),
+    )
 
 
 def run_evaluation(
