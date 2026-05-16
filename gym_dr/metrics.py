@@ -36,6 +36,7 @@ class _EpisodeMetrics:
 
     steps: int = 0
     reward_sum: float = 0.0
+    eval_reward_sum: float = 0.0
     offtrack_count: int = 0
     crash_count: int = 0
     max_progress: float = 0.0
@@ -45,15 +46,17 @@ class _EpisodeMetrics:
     def reset(self) -> None:
         self.steps = 0
         self.reward_sum = 0.0
+        self.eval_reward_sum = 0.0
         self.offtrack_count = 0
         self.crash_count = 0
         self.max_progress = 0.0
         self.speed_sum = 0.0
         self.steering_abs_sum = 0.0
 
-    def record_step(self, params: dict, reward: float) -> None:
+    def record_step(self, params: dict, reward: float, eval_reward: float = 0.0) -> None:
         self.steps += 1
         self.reward_sum += float(reward)
+        self.eval_reward_sum += float(eval_reward)
         if params.get("is_offtrack", False) or not params.get("all_wheels_on_track", True):
             self.offtrack_count += 1
         if params.get("is_crashed", False):
@@ -68,6 +71,7 @@ class _EpisodeMetrics:
         n = max(self.steps, 1)
         return {
             "dr/ep_reward": self.reward_sum,
+            "dr/ep_eval_reward": self.eval_reward_sum,
             "dr/ep_length": float(self.steps),
             "dr/ep_offtrack_count": float(self.offtrack_count),
             "dr/ep_crash_count": float(self.crash_count),
@@ -78,10 +82,30 @@ class _EpisodeMetrics:
         }
 
 
-def _wrap_reward(reward_fn: Callable[[dict], float], state: _EpisodeMetrics) -> Callable[[dict], float]:
+def _wrap_reward(
+    reward_fn: Callable[[dict], float],
+    state: _EpisodeMetrics,
+    eval_reward_fn: Callable[[dict], float] | None = None,
+) -> Callable[[dict], float]:
+    """Wrap the training reward so it also records per-step params + (optionally)
+    runs the eval reward in parallel.
+
+    The eval reward is computed on the same params dict but its return value is
+    NOT used by the env — only recorded into the episode summary as
+    ``dr/ep_eval_reward``. This lets HPO trials with different training rewards
+    be compared on a fixed evaluation metric.
+    """
     def wrapped(params: dict) -> float:
         r = reward_fn(params)
-        state.record_step(params, r)
+        if eval_reward_fn is None:
+            state.record_step(params, r)
+        else:
+            try:
+                er = float(eval_reward_fn(params))
+            except Exception:
+                # Don't let a buggy eval reward kill training.
+                er = 0.0
+            state.record_step(params, r, er)
         return r
 
     # Preserve identity for introspection / archival (inspect.getsource still finds the original).
@@ -124,7 +148,12 @@ def install_metrics(experiment: "ExperimentConfig") -> Tuple["ExperimentConfig",
     pick up.
     """
     state = _EpisodeMetrics()
-    wrapped_reward = _wrap_reward(experiment.reward, state)
+    # The eval reward (if set) is computed in parallel to the training reward
+    # but never returned to the env — it lands only in the episode summary as
+    # ``dr/ep_eval_reward``, giving HPO trials with different training rewards
+    # a comparable yardstick.
+    eval_reward_fn = getattr(experiment, "eval_reward", None)
+    wrapped_reward = _wrap_reward(experiment.reward, state, eval_reward_fn=eval_reward_fn)
     wrapped_experiment = experiment.with_overrides(reward=wrapped_reward)
 
     def wrap(env: Any) -> Any:

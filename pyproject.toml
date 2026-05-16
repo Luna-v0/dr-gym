@@ -5,13 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gym-dr"
 version = "0.3.0"
-requires-python = ">=3.10"
+# Lower bound matches the simapp container (Python 3.8) so the host test
+# suite can run on 3.8 and catch regressions that would crash in-container.
+# No upper bound — host can still be newer if you want; `.python-version`
+# picks 3.8 on a fresh `uv sync`.
+requires-python = ">=3.8"
 dependencies = [
+  # Base constraints — let uv resolve the latest on a modern host.
   "stable-baselines3>=2.3",
   "tensorboard",
   "mlflow>=2.10",
   "optuna>=3.5",
   "gymnasium",
+  # On Python 3.8 (the simapp container), cap each dep at the last major
+  # that still ships 3.8 wheels. On 3.9+ these constraints are inert and
+  # uv picks the latest as before.
+  "stable-baselines3<2.4; python_version<'3.9'",
+  "torch<2.5;             python_version<'3.9'",
+  "tensorboard<2.16;      python_version<'3.9'",
+  "mlflow<2.17;           python_version<'3.9'",
+  "optuna<4;              python_version<'3.9'",
+  "gymnasium<1.0;         python_version<'3.9'",
 ]
 
 [dependency-groups]
@@ -19,6 +33,9 @@ dev = [
   "pytest>=8",
   "onnx>=1.15",
   "onnxscript>=0.1",
+  # onnxscript >=0.2 uses runtime PEP 585 subscripting that crashes on
+  # Python 3.8 — keep the simapp-3.8 host on the 0.1.x line.
+  "onnxscript<0.2; python_version<'3.9'",
 ]
 
 [tool.setuptools]

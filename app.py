@@ -36,9 +36,10 @@ from gym_dr import (
     study,
     time_trial,
     center_line,
-    existing_tracks
+    existing_tracks,
 )
 from gym_dr.networks import DEEPRACER_CONV_PRESETS, DeepRacerCNN
+from gym_dr.rewards import REWARD_VARIANTS
 
 
 # --------------------------------------------------------------------------- #
@@ -145,6 +146,16 @@ def search_space(trial) -> dict:
         # the policy implicit temporal context. AWS's default is 1.
         "trainer.frame_stack":          trial.suggest_int("frame_stack", 1, 4),
     }
+
+    # --- Reward function -----------------------------------------------------
+    # Sweep the *training* reward across the registered variants in
+    # gym_dr/rewards.py. Optuna's suggest_categorical only accepts hashable
+    # scalars (no function objects), so we sample a name and look up the
+    # callable. The *evaluation* reward stays fixed (ExperimentConfig.eval_reward
+    # defaults to progress_per_step) so trials trained with different rewards
+    # can still be compared fairly on `dr/ep_eval_reward` in MLflow/TB.
+    reward_name = trial.suggest_categorical("reward_fn", list(REWARD_VARIANTS))
+    overrides["reward"] = REWARD_VARIANTS[reward_name]
 
     # --- CNN tower: a named DeepRacer arch, or a custom sampled stack -------
     cnn_arch = trial.suggest_categorical("cnn_arch", ["shallow", "standard", "deep", "custom"])

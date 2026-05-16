@@ -27,7 +27,16 @@ from gym_dr.config import (
     load_search_space,
 )
 from gym_dr.envs import time_trial
-from gym_dr.rewards import center_line, progress_and_speed
+from gym_dr.rewards import (
+    REWARD_VARIANTS,
+    anti_zigzag,
+    center_line,
+    centerline_quadratic,
+    progress_and_speed,
+    progress_per_step,
+    progress_safe,
+    waypoint_anticipation,
+)
 from gym_dr.tracks import ALL_TRACKS, TRACKS, display_name, existing_tracks
 from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
 
@@ -45,13 +54,19 @@ __all__ = [
     "TrainingContext",
     "TrainResult",
     "WorldsConfig",
+    "REWARD_VARIANTS",
+    "anti_zigzag",
     "center_line",
+    "centerline_quadratic",
     "display_name",
     "existing_tracks",
     "inspect",
     "load_config",
     "load_search_space",
     "progress_and_speed",
+    "progress_per_step",
+    "progress_safe",
+    "waypoint_anticipation",
     "study",
     "time_trial",
     "train",

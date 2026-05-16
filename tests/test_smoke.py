@@ -227,10 +227,13 @@ def test_app_py_search_space_applies_to_base():
     spec.loader.exec_module(mod)
 
     study = optuna.create_study(direction="maximize")
-    # Sample a few trials so the conditional "custom" CNN branch is exercised.
-    for _ in range(8):
+    # Sample a few trials so the conditional "custom" CNN branch is exercised
+    # and the reward-fn categorical sees more than one value.
+    seen_rewards = set()
+    for _ in range(12):
         trial = study.ask()
         overrides = mod.search_space(trial)
+        seen_rewards.add(overrides["reward"].__name__)
         new_cfg = mod.base.with_overrides(**overrides)
 
         # PPO hyperparams landed.
@@ -262,6 +265,10 @@ def test_app_py_search_space_applies_to_base():
 
         # Original base config not mutated.
         assert "policy_kwargs" not in mod.base.trainer.kwargs
+
+    # Reward sweep: across 12 trials at least 2 different variants should
+    # have been picked from the registry.
+    assert len(seen_rewards) >= 2, seen_rewards
 
 
 def test_device_gpu_alias_falls_back_too(container_mode, capfd):
@@ -412,6 +419,7 @@ def test_reward_metrics_recorded_to_tensorboard(container_mode):
     scalar_tags = set(acc.Tags().get("scalars", []))
     expected = {
         "dr/ep_reward",
+        "dr/ep_eval_reward",   # parallel-recorded eval reward
         "dr/ep_length",
         "dr/ep_max_progress",
         "dr/ep_offtrack_count",
@@ -419,6 +427,28 @@ def test_reward_metrics_recorded_to_tensorboard(container_mode):
     }
     missing = expected - scalar_tags
     assert not missing, f"missing DR metrics in TB: {missing}; got {sorted(scalar_tags)}"
+
+
+def test_eval_reward_differs_from_training_reward(container_mode):
+    """If training reward and eval reward are different functions, the
+    recorded `dr/ep_reward` and `dr/ep_eval_reward` should differ for at
+    least one episode. (If they're the same fn, they'd match — sanity-
+    test the wiring by setting them to known-different functions.)"""
+    from gym_dr.rewards import center_line, progress_per_step
+
+    tmp_path = container_mode
+    # Force them to be different callables.
+    exp = _experiment("eval_reward_check", tmp_path).with_overrides(
+        reward=center_line, eval_reward=progress_per_step,
+    )
+    train(exp)
+
+    # Walk the run_config.json — eval_reward serialized as a different dotted
+    # path than reward.
+    import json
+    cfg = json.loads((tmp_path / "artifacts" / "eval_reward_check" / "run_config.json").read_text())
+    assert cfg["reward"] != cfg["eval_reward"], cfg
+    assert cfg["eval_reward"].endswith("progress_per_step")
 
 
 def test_mlflow_run_group_tag_applied(container_mode, monkeypatch):

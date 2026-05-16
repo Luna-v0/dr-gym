@@ -196,6 +196,18 @@ def _default_reward():
     return center_line
 
 
+def _default_eval_reward():
+    # progress_safe is the eval-only "stay on track and finish fast" metric:
+    # monotone in lap pace on-track, large negative penalty (-100) per
+    # off-track step so any track exit dominates the episode total. Fair
+    # cross-trial comparison since it's invariant to the training reward
+    # an HPO trial happened to sample. NEVER use this as a training reward
+    # — the large negative would destabilise PPO; use it only as eval_reward.
+    from gym_dr.rewards import progress_safe
+
+    return progress_safe
+
+
 @dataclass(frozen=True)
 class ExperimentConfig:
     """A full training experiment definition.
@@ -236,10 +248,20 @@ class ExperimentConfig:
     ``Sb3Trainer(name="sac", ...)``)."""
 
     reward: Callable[[dict], float] = field(default_factory=_default_reward)
-    """``(params: dict) -> float`` — the reward function. ``params`` is the
+    """``(params: dict) -> float`` — the *training* reward. ``params`` is the
     upstream DeepRacer reward-params dict (``track_width``,
     ``distance_from_center``, ``progress``, ``speed``, ``all_wheels_on_track``,
-    ``waypoints``, ...). See ``gym_dr/rewards.py`` for examples."""
+    ``waypoints``, ...). See ``gym_dr/rewards.py`` for variants."""
+
+    eval_reward: Callable[[dict], float] = field(default_factory=_default_eval_reward)
+    """``(params: dict) -> float`` — the *evaluation* reward, computed in
+    parallel to the training reward and logged per-episode as
+    ``dr/ep_eval_reward``. Default ``progress_safe``: progress-per-step
+    on-track, with a large per-step penalty (-100) when any wheel leaves
+    the track, so any track exit dominates the episode total. Invariant
+    to the training reward chosen per trial, so HPO trials that sweep
+    different training rewards can still be ranked fairly on this metric.
+    Doesn't affect what the policy optimizes (that's ``reward``)."""
 
     action_space: ActionSpaceConfig = field(default_factory=ContinuousActionSpaceConfig)
     """Continuous bounds (steering and speed ranges) or a discrete action
@@ -301,6 +323,7 @@ class ExperimentConfig:
             "env_factory": _describe_callable(self.env_factory),
             "trainer": _describe(self.trainer),
             "reward": _describe_callable(self.reward),
+            "eval_reward": _describe_callable(self.eval_reward),
             "action_space": {
                 **dataclasses.asdict(self.action_space),
                 "action_space_type": self.action_space.action_space_type,
