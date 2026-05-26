@@ -66,6 +66,12 @@ class TrainingContext:
     seed: int | None = None
     """Random seed plumbed from ``ExperimentConfig.seed``. Trainers should
     forward this to their RL library and to ``env.reset(seed=...)``."""
+    metrics_state: Any | None = None
+    """Handle to ``gym_dr.metrics._EpisodeMetrics``, owned by the orchestrator.
+    Trainers can flip ``metrics_state.use_eval_reward`` around evaluation
+    episodes so SB3's ``EvalCallback.last_mean_reward`` (and hence the value
+    forwarded to Optuna via ``report_eval``) reflects the configured
+    ``eval_reward`` instead of the per-trial training reward."""
 
     def save_model(self, save_fn: Callable[[Path], None], *, name: str) -> Path:
         """Save a top-level model artifact with its DeepRacer metadata sidecar.
@@ -121,19 +127,20 @@ class TrainingContext:
         if mlflow.active_run() is None:
             return
         try:
-            mlflow.log_metric(name.replace("/", "_"), float(value), step=step)
+            mlflow.log_metric(name, float(value), step=step)
         except (TypeError, ValueError):
             return
 
     def report_eval(self, mean_reward: float, step: int) -> None:
         """Log evaluation reward to MLflow and check Optuna for pruning.
 
-        Always logs ``eval_mean_reward`` to MLflow at ``step``. When the
-        trainer was invoked as part of an HPO trial (``ctx.trial`` is set),
-        this also calls ``trial.report`` and raises ``optuna.TrialPruned``
-        if the pruner decides this trial is unlikely to win.
+        Always logs ``eval/mean_reward`` to MLflow at ``step`` (matching the
+        SB3 TensorBoard key written by ``EvalCallback``). When the trainer
+        was invoked as part of an HPO trial (``ctx.trial`` is set), this
+        also calls ``trial.report`` and raises ``optuna.TrialPruned`` if the
+        pruner decides this trial is unlikely to win.
         """
-        self.log_metric("eval_mean_reward", mean_reward, step)
+        self.log_metric("eval/mean_reward", mean_reward, step)
         if self.trial is not None:
             self.trial.report(float(mean_reward), step)
             if self.trial.should_prune():

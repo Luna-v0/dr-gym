@@ -144,7 +144,7 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     # finalizes per-episode metrics into info['dr_episode']. See gym_dr/metrics.py.
     from gym_dr.metrics import install_metrics
 
-    experiment, env_wrapper = install_metrics(experiment)
+    experiment, env_wrapper, metrics_state = install_metrics(experiment)
 
     _write_json(run_dir / "run_config.json", experiment.to_dict())
     _update_status(run_dir, "initialized")
@@ -156,6 +156,7 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
         training=experiment.training,
         trial=trial,
         seed=experiment.seed,
+        metrics_state=metrics_state,
     )
 
     started_at = time.monotonic()

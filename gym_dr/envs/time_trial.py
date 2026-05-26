@@ -47,10 +47,26 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     """
     from deepracer_env.environments.deepracer_env import DeepRacerEnv
 
-    from gym_dr.envs.wrappers import GrayscaleObs
+    from gym_dr.action_space import ContinuousActionSpaceConfig
+    from gym_dr.envs.wrappers import ActionBounds, GrayscaleObs
 
     env = DeepRacerEnv(
         reward_fn=experiment.reward,
         sensors=list(experiment.action_space.sensor),
     )
+    # Enforce ``ContinuousActionSpaceConfig`` bounds at the wrapper level.
+    # Upstream's default action space is ``Box([-30, 0.1], [30, 4.0])`` and its
+    # rollout controller hardcodes ``MIN_SPEED=0.1`` — passing a tighter
+    # ``speed_low`` only flows into ``model_metadata.json`` otherwise. The
+    # wrapper makes the bound real for both PPO's action distribution and the
+    # commanded action that reaches Gazebo.
+    cfg = experiment.action_space
+    if isinstance(cfg, ContinuousActionSpaceConfig):
+        env = ActionBounds(
+            env,
+            steering_low=cfg.steering_low,
+            steering_high=cfg.steering_high,
+            speed_low=cfg.speed_low,
+            speed_high=cfg.speed_high,
+        )
     return GrayscaleObs(env)

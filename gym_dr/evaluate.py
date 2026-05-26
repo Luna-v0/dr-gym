@@ -173,7 +173,7 @@ def run_evaluation(
     LOG.info("evaluating %s (frame_stack=%d)", model_path, frame_stack)
 
     # Metrics wrapper gives us info["dr_episode"] summaries for free.
-    wrapped_experiment, env_wrapper = install_metrics(experiment)
+    wrapped_experiment, env_wrapper, _metrics_state = install_metrics(experiment)
     base_env = env_wrapper(wrapped_experiment.env_factory(wrapped_experiment))
 
     venv = DummyVecEnv([lambda: base_env])

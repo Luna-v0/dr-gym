@@ -58,19 +58,21 @@ def test_variant_returns_finite_float(name, fn):
     r = fn(_full_params())
     assert isinstance(r, float)
     assert math.isfinite(r)
-    assert r > 0.0   # floor at 1e-3 — never exact zero
+    assert r > 0.0   # on-track reward is positive
 
 
 @pytest.mark.parametrize("name,fn", VARIANTS, ids=[n for n, _ in VARIANTS])
 def test_variant_handles_offtrack(name, fn):
-    """Off-track / wheels-off should yield a *small* (not negative, not huge)
-    reward — exact value varies by variant."""
+    """Off-track / wheels-off must yield a *finite, negative* reward —
+    actively punishing excursion, since the upstream env doesn't terminate
+    on off-track. Exact magnitude varies by variant."""
     r_on = fn(_full_params(all_wheels_on_track=True, is_offtrack=False))
     r_off = fn(_full_params(all_wheels_on_track=False, is_offtrack=True))
-    assert math.isfinite(r_off) and r_off > 0
-    # On-track must dominate off-track for every variant (no perverse incentive
-    # to leave the road).
-    assert r_on >= r_off, f"{name}: on={r_on} off={r_off}"
+    assert math.isfinite(r_off)
+    assert r_off < 0, f"{name}: off-track reward must be negative, got {r_off}"
+    # On-track must strictly dominate off-track for every variant (no
+    # perverse incentive to leave the road).
+    assert r_on > r_off, f"{name}: on={r_on} off={r_off}"
 
 
 @pytest.mark.parametrize(
@@ -106,20 +108,19 @@ def test_centerline_quadratic_peaks_at_center():
     assert centered > near_edge
 
 
-def test_progress_safe_heavy_offtrack_penalty():
+def test_progress_safe_offtrack_penalty():
     """progress_safe is the eval-only reward. Off-track must produce a
-    large negative per step so that a single off-track moment dominates
-    the episode total (not just floors to 1e-3 like training rewards)."""
+    negative per-step value strictly worse than any on-track value so a
+    cleaner lap always ranks above a dirtier one of the same length."""
     on = progress_safe(_full_params(all_wheels_on_track=True, is_offtrack=False))
     off_wheels = progress_safe(_full_params(all_wheels_on_track=False))
     off_flag = progress_safe(_full_params(is_offtrack=True))
     assert on > 0
     assert off_wheels == OFFTRACK_PENALTY
     assert off_flag == OFFTRACK_PENALTY
-    # A handful (~10) of off-track steps should fully cancel a 200-step
-    # clean lap at fixture pace — the "discount a lot" design point.
-    typical_lap_sum = on * 200
-    assert 10 * abs(OFFTRACK_PENALTY) >= typical_lap_sum
+    assert OFFTRACK_PENALTY < 0
+    # Off-track must strictly worsen episode total per step.
+    assert off_wheels < on
 
 
 def test_progress_safe_not_in_training_variants():

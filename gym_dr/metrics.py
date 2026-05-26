@@ -32,7 +32,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class _EpisodeMetrics:
-    """Stateful per-step accumulator; finalized on episode boundary."""
+    """Stateful per-step accumulator; finalized on episode boundary.
+
+    ``use_eval_reward`` is a global mode flag (NOT reset per episode). When
+    True, the wrapped reward returns ``eval_reward_fn(params)`` to the env
+    instead of the training reward — used by ``CtxEvalCallback`` so SB3's
+    EvalCallback measures the policy against ``eval_reward`` (giving Optuna
+    a yardstick comparable across trials that trained on different rewards).
+    """
 
     steps: int = 0
     reward_sum: float = 0.0
@@ -42,6 +49,7 @@ class _EpisodeMetrics:
     max_progress: float = 0.0
     speed_sum: float = 0.0
     steering_abs_sum: float = 0.0
+    use_eval_reward: bool = False
 
     def reset(self) -> None:
         self.steps = 0
@@ -52,6 +60,8 @@ class _EpisodeMetrics:
         self.max_progress = 0.0
         self.speed_sum = 0.0
         self.steering_abs_sum = 0.0
+        # use_eval_reward is intentionally NOT reset — it's a mode flag
+        # toggled by the eval callback around evaluation episodes.
 
     def record_step(self, params: dict, reward: float, eval_reward: float = 0.0) -> None:
         self.steps += 1
@@ -90,23 +100,26 @@ def _wrap_reward(
     """Wrap the training reward so it also records per-step params + (optionally)
     runs the eval reward in parallel.
 
-    The eval reward is computed on the same params dict but its return value is
-    NOT used by the env — only recorded into the episode summary as
-    ``dr/ep_eval_reward``. This lets HPO trials with different training rewards
-    be compared on a fixed evaluation metric.
+    Behaviour depends on ``state.use_eval_reward``:
+      * False (default, training mode) — env sees the training reward;
+        ``dr/ep_eval_reward`` is still recorded in parallel for monitoring.
+      * True (set by ``CtxEvalCallback`` during SB3 evaluation episodes) —
+        env sees the eval reward instead, so ``last_mean_reward`` reflects
+        the eval-reward yardstick and Optuna prunes on a fair, cross-trial
+        metric. Both sums are still recorded.
     """
     def wrapped(params: dict) -> float:
-        r = reward_fn(params)
+        r_train = float(reward_fn(params))
         if eval_reward_fn is None:
-            state.record_step(params, r)
-        else:
-            try:
-                er = float(eval_reward_fn(params))
-            except Exception:
-                # Don't let a buggy eval reward kill training.
-                er = 0.0
-            state.record_step(params, r, er)
-        return r
+            state.record_step(params, r_train)
+            return r_train
+        try:
+            r_eval = float(eval_reward_fn(params))
+        except Exception:
+            # Don't let a buggy eval reward kill training.
+            r_eval = 0.0
+        state.record_step(params, r_train, r_eval)
+        return r_eval if state.use_eval_reward else r_train
 
     # Preserve identity for introspection / archival (inspect.getsource still finds the original).
     wrapped.__wrapped__ = reward_fn  # type: ignore[attr-defined]
@@ -135,23 +148,22 @@ class _MetricsEnvWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
-def install_metrics(experiment: "ExperimentConfig") -> Tuple["ExperimentConfig", Callable[[Any], Any]]:
+def install_metrics(
+    experiment: "ExperimentConfig",
+) -> Tuple["ExperimentConfig", Callable[[Any], Any], _EpisodeMetrics]:
     """Wire metrics around an experiment's reward + env.
 
-    Returns ``(experiment_with_wrapped_reward, env_wrapper)``. The caller
-    should build the env via ``experiment.env_factory(experiment_with_...)``
-    then wrap with ``env_wrapper(env)`` before handing to the trainer.
+    Returns ``(experiment_with_wrapped_reward, env_wrapper, state)``. The
+    caller should build the env via ``experiment.env_factory(experiment_with_...)``
+    then wrap with ``env_wrapper(env)`` before handing to the trainer. The
+    ``state`` handle lets the trainer toggle ``state.use_eval_reward``
+    around evaluation episodes (see ``CtxEvalCallback``).
 
-    The wrapped reward records every call's params into a private state
-    object; the env wrapper finalizes that state on each terminal step and
-    stashes the summary in ``info["dr_episode"]`` for the SB3 callback to
-    pick up.
+    The wrapped reward records every call's params into the state object;
+    the env wrapper finalizes that state on each terminal step and stashes
+    the summary in ``info["dr_episode"]`` for the SB3 callback to pick up.
     """
     state = _EpisodeMetrics()
-    # The eval reward (if set) is computed in parallel to the training reward
-    # but never returned to the env — it lands only in the episode summary as
-    # ``dr/ep_eval_reward``, giving HPO trials with different training rewards
-    # a comparable yardstick.
     eval_reward_fn = getattr(experiment, "eval_reward", None)
     wrapped_reward = _wrap_reward(experiment.reward, state, eval_reward_fn=eval_reward_fn)
     wrapped_experiment = experiment.with_overrides(reward=wrapped_reward)
@@ -159,4 +171,4 @@ def install_metrics(experiment: "ExperimentConfig") -> Tuple["ExperimentConfig",
     def wrap(env: Any) -> Any:
         return _MetricsEnvWrapper(env, state)
 
-    return wrapped_experiment, wrap
+    return wrapped_experiment, wrap, state

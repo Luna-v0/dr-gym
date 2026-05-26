@@ -29,6 +29,45 @@ import numpy as np
 _LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
+class ActionBounds(gym.ActionWrapper):
+    """Re-bound the env's continuous action space to ``[(s_lo, v_lo), (s_hi, v_hi)]``.
+
+    The upstream ``DeepRacerEnv`` always exposes ``Box([-30, 0.1], [30, 4.0])``
+    and ``rollout_agent_ctrl.py`` hardcodes ``MIN_SPEED=0.1`` — so passing a
+    tighter ``ContinuousActionSpaceConfig`` to the gym factory has no effect
+    on what speeds the policy can command (or what the env will execute)
+    unless we also enforce it here.
+
+    Concretely: this wrapper reports the tighter Box to PPO (so its Gaussian
+    is parametrised over the right range) AND clips every commanded action
+    before it reaches the inner env (so the upstream MIN_SPEED clip becomes
+    a no-op for actions that are already above our floor).
+
+    Use this when you need a hard minimum speed — e.g. to stop the policy
+    from "winning" by crawling at 0.1 m/s.
+    """
+
+    def __init__(
+        self,
+        env: gym.Env,
+        *,
+        steering_low: float,
+        steering_high: float,
+        speed_low: float,
+        speed_high: float,
+    ) -> None:
+        super().__init__(env)
+        self._low = np.array([steering_low, speed_low], dtype=np.float32)
+        self._high = np.array([steering_high, speed_high], dtype=np.float32)
+        self.action_space = gym.spaces.Box(
+            low=self._low, high=self._high, dtype=np.float32
+        )
+
+    def action(self, action):
+        a = np.asarray(action, dtype=np.float32)
+        return np.clip(a, self._low, self._high)
+
+
 class GrayscaleObs(gym.ObservationWrapper):
     """Convert RGB image keys in a Dict observation to single-channel gray.
 

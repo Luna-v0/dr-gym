@@ -55,6 +55,14 @@ class CtxEvalCallback(EvalCallback):
 
     `ctx.report_eval` handles MLflow logging and Optuna pruning. We also write
     the metadata sidecar for `best_model.zip` whenever it gets saved.
+
+    During evaluation we flip ``ctx.metrics_state.use_eval_reward`` so the env
+    returns ``ExperimentConfig.eval_reward(params)`` instead of the training
+    reward. Without this, ``last_mean_reward`` (and therefore the Optuna
+    pruning signal) would be in units of the *training* reward — making
+    cross-trial comparison meaningless whenever the HPO search sweeps the
+    reward function. The flag is restored to False after the eval block so
+    subsequent training rollouts go back to the training reward.
     """
 
     def __init__(self, *args: Any, ctx, **kwargs: Any) -> None:
@@ -62,8 +70,16 @@ class CtxEvalCallback(EvalCallback):
         self._ctx = ctx
 
     def _on_step(self) -> bool:
-        proceed = super()._on_step()
-        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+        is_eval_step = self.eval_freq > 0 and self.n_calls % self.eval_freq == 0
+        state = getattr(self._ctx, "metrics_state", None)
+        if is_eval_step and state is not None:
+            state.use_eval_reward = True
+        try:
+            proceed = super()._on_step()
+        finally:
+            if state is not None:
+                state.use_eval_reward = False
+        if is_eval_step:
             if self.best_model_save_path is not None:
                 best_zip = Path(self.best_model_save_path) / "best_model.zip"
                 if best_zip.exists():
@@ -161,7 +177,7 @@ class MlflowMirrorCallback(BaseCallback):
         step = int(self.num_timesteps)
         for key, value in self.logger.name_to_value.items():
             try:
-                mlflow.log_metric(key.replace("/", "_"), float(value), step=step)
+                mlflow.log_metric(key, float(value), step=step)
             except (TypeError, ValueError):
                 continue
 

@@ -20,7 +20,10 @@ The variants are grounded in well-known DeepRacer community patterns:
   because they require a per-track precomputed racing line)
 
 Hard rules every variant follows:
-- Never return 0 — PPO does odd things at 0; floor to ``1e-3``.
+- Off-track is *actively* punished (negative number per step). The upstream
+  DeepRacer env does NOT terminate the episode on excursion, so a small
+  positive off-track reward leaves the agent free to drive off-track and
+  accumulate return — which is exactly what trials in the first study did.
 - Gate speed bonuses on ``all_wheels_on_track`` so agents can't game raw
   speed by adding off-track steps.
 - Use ``.get(...)`` defensively so a variant works against a partial
@@ -29,6 +32,15 @@ Hard rules every variant follows:
 from __future__ import annotations
 
 import math
+
+
+# Per-step penalty applied when the car is off-track. Sized to overwhelm
+# the *best* per-step on-track reward across the training variants below,
+# so any off-track step strictly worsens episode return. The eval-only
+# reward (``progress_safe``) uses a much larger penalty (-1000) because
+# it's summed over the whole episode for Optuna ranking; here we want a
+# value small enough that PPO's value head stays well-conditioned.
+OFFTRACK_STEP_PENALTY = -5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -40,27 +52,26 @@ def center_line(params: dict) -> float:
 
     Three concentric bands measured as a fraction of ``track_width``:
     inside 10% gets the strongest reward, inside 25% a small reward, inside
-    50% a tiny one, off-lane a near-zero floor. Mirrors the canonical AWS
-    DeepRacer starter reward.
+    50% a tiny one. Off-track is actively punished. Mirrors the canonical
+    AWS DeepRacer starter reward.
     """
-    track_width = params["track_width"]
-    distance_from_center = params["distance_from_center"]
-    all_wheels_on_track = params["all_wheels_on_track"]
+    if not params.get("all_wheels_on_track", True):
+        return OFFTRACK_STEP_PENALTY
 
-    if not all_wheels_on_track: return 0.1
-
-
+    track_width = float(params.get("track_width", 1.0))
+    distance_from_center = float(params.get("distance_from_center", 0.0))
 
     if distance_from_center <= 0.1 * track_width:
-        multiplier = 100.0
-    if distance_from_center <= 0.25 * track_width:
-        multiplier =  0.5
-    if distance_from_center <= 0.5 * track_width:
+        multiplier = 1.0
+    elif distance_from_center <= 0.25 * track_width:
+        multiplier = 0.5
+    elif distance_from_center <= 0.5 * track_width:
         multiplier = 0.1
     else:
         multiplier = 0.01
 
-    return float(max(params["progress"] * params["speed"] / 4.0, 1e-3)) * multiplier
+    base = max(params.get("progress", 0.0) * params.get("speed", 0.0) / 4.0, 1e-3)
+    return float(base) * multiplier
 
 
 
@@ -72,7 +83,7 @@ def progress_and_speed(params: dict) -> float:
     centre line.
     """
     if not params.get("all_wheels_on_track", True):
-        return 1e-3
+        return OFFTRACK_STEP_PENALTY
     progress = float(params.get("progress", 0.0))
     speed = float(params.get("speed", 0.0))
     return float(max(progress * speed / 4.0, 1e-3))
@@ -95,7 +106,7 @@ def progress_per_step(params: dict) -> float:
     invariant to training-reward choice makes cross-trial comparison fair.
     """
     if not params.get("all_wheels_on_track", True):
-        return 1e-3
+        return OFFTRACK_STEP_PENALTY
     progress = float(params.get("progress", 0.0))
     steps = max(int(params.get("steps", 1) or 1), 1)
     speed = float(params.get("speed", 0.0))
@@ -111,11 +122,11 @@ def centerline_quadratic(params: dict) -> float:
     sharp steering.
     """
     if not params.get("all_wheels_on_track", True) or params.get("is_offtrack", False):
-        return 1e-3
+        return OFFTRACK_STEP_PENALTY
     d = float(params.get("distance_from_center", 0.0))
     half_w = float(params.get("track_width", 1.0)) / 2.0
     if half_w <= 0:
-        return 1e-3
+        return OFFTRACK_STEP_PENALTY
     reward = max(1.0 - (d / half_w) ** 2, 1e-3)
     steps = max(int(params.get("steps", 1) or 1), 1)
     reward += float(params.get("progress", 0.0)) / steps
@@ -131,6 +142,8 @@ def anti_zigzag(params: dict) -> float:
     ``|steering_angle| > 15``. Drop-in modifier for "stop the car
     swerving" — used as-is by many DeepRacer League entrants.
     """
+    if not params.get("all_wheels_on_track", True) or params.get("is_offtrack", False):
+        return OFFTRACK_STEP_PENALTY
     d = float(params.get("distance_from_center", 0.0))
     tw = float(params.get("track_width", 1.0))
     if d <= 0.1 * tw:
@@ -162,12 +175,12 @@ def waypoint_anticipation(params: dict) -> float:
     SPEED_THRESHOLD = 2.0
 
     if not params.get("all_wheels_on_track", True) or params.get("is_offtrack", False):
-        return 1e-3
+        return OFFTRACK_STEP_PENALTY
 
     d = float(params.get("distance_from_center", 0.0))
     half_w = float(params.get("track_width", 1.0)) / 2.0
     if half_w <= 0:
-        return 1e-3
+        return OFFTRACK_STEP_PENALTY
     reward = max(1.0 - (d / half_w) ** 2, 1e-3)
 
     waypoints = params.get("waypoints") or []
@@ -210,17 +223,21 @@ def waypoint_anticipation(params: dict) -> float:
 # reward regardless of its training reward.
 # --------------------------------------------------------------------------- #
 
-OFFTRACK_PENALTY = -1000.0
-"""Per-step penalty applied when ``all_wheels_on_track`` is False or
-``is_offtrack`` is True. Sized to be ~30x a typical on-track per-step
-reward at racing pace (~30/step at speed≈3, progress/steps≈0.5%), so:
+OFFTRACK_PENALTY = -1.0
+"""Per-step penalty applied (in the eval reward) when off-track. Sized to
+be a small constant negative so that the eval reward stays in the same
+order of magnitude as the on-track reward (~progress/steps*100 + speed^2,
+roughly 10–30/step at racing pace).
 
-  - A clean 200-step lap scores ~6000.
-  - Even a handful of off-track steps (~6) zeroes out the lap.
-  - A persistently off-track agent ends episodes deeply negative.
+Originally -1000, which made *any* off-track excursion dominate the
+episode total and crushed Optuna's ability to distinguish a fast lap
+with one excursion from a slow but clean crawl. With -1 the off-track
+penalty is a soft, comparable bias: a few off-track steps modestly
+reduce the score, while persistent off-track driving still ranks below
+on-track driving — but not catastrophically so.
 
-The eval reward is *summed* over the episode, so this magnitude is what
-makes "any track exit dominates the episode total" actually true."""
+Combine with the training-reward off-track penalty (``OFFTRACK_STEP_PENALTY``)
+which is sized differently because it drives PPO's value head directly."""
 
 
 def progress_safe(params: dict) -> float:

@@ -47,14 +47,14 @@ from gym_dr.rewards import REWARD_VARIANTS
 # call at the bottom of the file (host orchestrator); the in-container worker
 # reads N_TRIALS_PER_WORKER from env vars set by the host.
 # --------------------------------------------------------------------------- #
-STUDY_NAME = "time_trail_exp2"
-N_TRIALS = 30
-N_PARALLEL = 2   # number of concurrent Docker workers (each runs its own simapp)
+STUDY_NAME = "time_trail_hard_track"
+N_TRIALS = 20
+N_PARALLEL = 7   # number of concurrent Docker workers (each runs its own simapp)
 SEED = 42        # int for reproducibility; None for nondeterministic
 
 
 base = ExperimentConfig(
-    name="hpo",
+    name=STUDY_NAME,
     env_factory=time_trial,
     trainer=Sb3Trainer(
         name="ppo",
@@ -75,24 +75,28 @@ base = ExperimentConfig(
     action_space=ContinuousActionSpaceConfig(
         steering_low=-30.0,
         steering_high=30.0,
-        speed_low=0.1,
+        # speed_low was 0.1 — the policy converged to crawling at that bound
+        # in the previous study (mean speeds 0.10-0.16 m/s on 13/21 trials),
+        # so trials "stayed on track" by barely moving. Raising the floor
+        # makes crawling a non-option: the policy has to actually drive.
+        speed_low=1.0,
         speed_high=4.0,
     ),
     # HPO uses worlds.names[0] for every trial; chunk_steps/rotations are
     # only consulted by the non-HPO host orchestrator.
     worlds=WorldsConfig(names=['Oval_track']),
     training=TrainingConfig(
-        total_timesteps=500_000,       # per-trial training budget — bumped from
+        total_timesteps=250_000,       # per-trial training budget — bumped from
                                        # 20k; DeepRacer policies climb slowly and
                                        # the (now lenient) MedianPruner still kills
                                        # weak trials, so wall-clock is mostly the
                                        # good trials.
-        checkpoint_freq=100_000,
+        checkpoint_freq=50_000,
         eval_freq=25_000,
         n_eval_episodes=3,
         rtf_override=10,
     ),
-    tracking=TrackingConfig(mlflow_experiment="time_trial_2"),
+    tracking=TrackingConfig(mlflow_experiment=STUDY_NAME),
     #enable_gui=True,   # watch the car: VNC client -> localhost:5900
     seed=SEED,
     use_gpu=True
@@ -144,7 +148,7 @@ def search_space(trial) -> dict:
         "trainer.kwargs.n_epochs":      trial.suggest_int("n_epochs", 4, 12),
         # Frame stacking — DeepRacerEnv emits single frames; stacking gives
         # the policy implicit temporal context. AWS's default is 1.
-        "trainer.frame_stack":          trial.suggest_int("frame_stack", 1, 4),
+        "trainer.frame_stack":          trial.suggest_int("frame_stack", 4, 4),
     }
 
     # --- Reward function -----------------------------------------------------
