@@ -73,6 +73,20 @@ class TrainingContext:
     forwarded to Optuna via ``report_eval``) reflects the configured
     ``eval_reward`` instead of the per-trial training reward."""
 
+    world_plan: list[str] | None = None
+    """Expanded, ordered sequence of worlds to train across in a *single*
+    container via the env's runtime track swap (``DeepRacerEnv.set_world``).
+    One entry per chunk: chunk ``i`` trains :attr:`chunk_steps` timesteps on
+    ``world_plan[i]`` then the trainer swaps to ``world_plan[i+1]`` without
+    restarting Gazebo. ``None`` (the default) means single-world training —
+    the legacy one-``model.learn`` path. The first entry is the world Gazebo
+    already loaded at container startup (``WORLD_NAME``); the trainer does not
+    swap before the first chunk."""
+
+    chunk_steps: int | None = None
+    """Timesteps to train per world chunk before swapping. Only consulted when
+    :attr:`world_plan` is set; falls back to ``training.total_timesteps``."""
+
     def save_model(self, save_fn: Callable[[Path], None], *, name: str) -> Path:
         """Save a top-level model artifact with its DeepRacer metadata sidecar.
 

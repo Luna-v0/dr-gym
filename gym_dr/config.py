@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from gym_dr.action_space import ActionSpaceConfig, ContinuousActionSpaceConfig
+from gym_dr.object_avoidance import ObjectAvoidanceConfig
 
 if TYPE_CHECKING:
     from gym_dr.trainers.base import Trainer
@@ -131,12 +132,12 @@ class TrackingConfig:
 class WorldsConfig:
     """Worlds to rotate through during a single training run.
 
-    Multi-world runs use *sequential rotation with shared policy*: the
-    orchestrator trains for ``chunk_steps`` timesteps on the first world,
-    saves a checkpoint, restarts the container with the next ``WORLD_NAME``
-    and ``RESUME_FROM`` pointing at that checkpoint, and continues. The
-    optimizer state and weights persist across switches (off-policy replay
-    buffers, if any, are lost — PPO has none).
+    Multi-world runs use *sequential rotation with shared policy* inside a
+    single container: the trainer trains ``chunk_steps`` timesteps on the
+    first world, then calls ``DeepRacerEnv.set_world`` to swap the Gazebo
+    track in place (no container restart, no gzserver restart) and continues.
+    The policy weights and PPO optimizer state stay in memory across swaps
+    (off-policy replay buffers, if any, would be lost — PPO has none).
 
     Example::
 
@@ -149,10 +150,9 @@ class WorldsConfig:
     runs 6 chunks of 20k timesteps each:
     reinvent_base -> Bowtie_track -> reinvent_base -> ... -> Bowtie_track.
 
-    For valid world names see ``.deepracer-env-upstream/tracks.txt``. The
-    current upstream simapp loads the world at container startup and cannot
-    switch at runtime; see the README's "Future work" section for the
-    runtime-switch design.
+    For valid world names see ``.deepracer-env-upstream/tracks.txt``. Upstream
+    swaps the world at runtime via ``DeepRacerEnv.set_world``, so the whole
+    rotation runs in one container.
     """
 
     names: list[str] = field(default_factory=lambda: ["reinvent_base"])
@@ -160,9 +160,9 @@ class WorldsConfig:
     training. The list order is the rotation order within each pass."""
 
     chunk_steps: int = 50_000
-    """Timesteps to train per ``(rotation, world)`` chunk. Each chunk runs
-    in its own Docker container and resumes from the previous chunk's
-    ``latest_model.zip``."""
+    """Timesteps to train per ``(rotation, world)`` chunk before swapping the
+    track at runtime. All chunks run in one container with one persistent
+    policy + Gazebo process (see the class docstring)."""
 
     rotations: int = 1
     """How many full passes through ``names``. With ``rotations=1`` and a
@@ -220,9 +220,11 @@ class ExperimentConfig:
     Plug-in points
     --------------
     - ``env_factory``: swap the env. Default ``gym_dr.envs.time_trial`` builds
-      a single-agent time-trial ``DeepRacerEnv``. To use a different race
-      type (object avoidance etc.) or a future env version, write a sibling
-      factory under ``gym_dr/envs/`` and reference it here.
+      a single-agent time-trial ``DeepRacerEnv`` and conditionally enables
+      static-obstacle Object Avoidance when ``object_avoidance`` is set.
+      To use a different upstream race type (head-to-head, F1) or a future
+      env version, write a sibling factory under ``gym_dr/envs/`` and
+      reference it here.
     - ``trainer``: swap the RL algorithm/library. Default
       ``gym_dr.trainers.Sb3Trainer()`` wraps SB3 PPO/SAC/TD3/A2C/DDPG. Any
       object with ``fit(env, ctx) -> TrainResult`` satisfies the protocol.
@@ -271,6 +273,16 @@ class ExperimentConfig:
     worlds: WorldsConfig = field(default_factory=WorldsConfig)
     """List of worlds to rotate through. Single-world runs use a list of one
     (the default: ``["reinvent_base"]``)."""
+
+    object_avoidance: ObjectAvoidanceConfig | None = None
+    """Optional static-obstacle Object Avoidance settings. ``None`` (the
+    default) keeps training pure time-trial. Set to an
+    :class:`ObjectAvoidanceConfig` instance to spawn obstacles each
+    episode — the ``time_trial`` env factory will translate it to upstream
+    and forward to ``DeepRacerEnv(object_avoidance=...)``. Pair with
+    :func:`gym_dr.rewards.object_avoidance_aware` (or your own reward) to
+    consume the resulting ``is_crashed`` / ``closest_objects`` reward
+    params."""
 
     training: TrainingConfig = field(default_factory=TrainingConfig)
     """Per-chunk training control: timesteps, eval/checkpoint frequencies,
@@ -329,6 +341,11 @@ class ExperimentConfig:
                 "action_space_type": self.action_space.action_space_type,
             },
             "worlds": dataclasses.asdict(self.worlds),
+            "object_avoidance": (
+                dataclasses.asdict(self.object_avoidance)
+                if self.object_avoidance is not None
+                else None
+            ),
             "training": dataclasses.asdict(self.training),
             "tracking": dataclasses.asdict(self.tracking),
             "enable_gui": self.enable_gui,

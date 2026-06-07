@@ -73,6 +73,24 @@ class Sb3Trainer:
     Dict obs (DeepRacer's ``FRONT_FACING_CAMERA``) SB3 stacks each key
     independently along its first axis. Typical sweep range: 1–4."""
 
+    @staticmethod
+    def _swap_world(model: Any, world: str) -> None:
+        """Swap the live Gazebo track to *world* and re-sync SB3's rollout state.
+
+        Calls ``DeepRacerEnv.set_world`` through the vec-env (``env_method``
+        forwards the call down through every VecEnvWrapper and gym wrapper to
+        the base env), then resets the env on the new world and points SB3's
+        ``_last_obs`` / ``_last_episode_starts`` at that fresh observation so
+        the next ``model.learn(reset_num_timesteps=False)`` rolls out on the
+        new track instead of continuing from a stale frame.
+        """
+        import numpy as np
+
+        vec = model.get_env()
+        vec.env_method("set_world", world)
+        model._last_obs = vec.reset()
+        model._last_episode_starts = np.ones((vec.num_envs,), dtype=bool)
+
     def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
         from stable_baselines3.common.callbacks import CallbackList
         from stable_baselines3.common.vec_env import (
@@ -209,12 +227,39 @@ class Sb3Trainer:
         # (e.g. PPO_1). Naming it after the run makes the TB sidebar legible
         # and matches the MLflow run name + the Optuna trial.user_attr.
         try:
-            model.learn(
-                total_timesteps=ctx.training.total_timesteps,
-                callback=CallbackList(callbacks),
-                reset_num_timesteps=not bool(ctx.training.resume_from),
-                tb_log_name=ctx.run_dir.name,
-            )
+            cb = CallbackList(callbacks)
+            if ctx.world_plan:
+                # In-container runtime rotation: train chunk_steps per world,
+                # swapping the track between chunks WITHOUT restarting Gazebo.
+                # The model (weights + PPO optimizer state) and the env persist
+                # across swaps — that is the whole point of doing it in one
+                # process instead of one container per (rotation, world).
+                chunk_steps = ctx.chunk_steps or ctx.training.total_timesteps
+                resumed = bool(ctx.training.resume_from)
+                for i, world in enumerate(ctx.world_plan):
+                    if i > 0:
+                        self._swap_world(model, world)
+                    print(
+                        f"[Sb3Trainer] chunk {i + 1}/{len(ctx.world_plan)}: "
+                        f"world={world!r} steps={chunk_steps}",
+                        flush=True,
+                    )
+                    model.learn(
+                        total_timesteps=chunk_steps,
+                        callback=cb,
+                        # Only the very first chunk may reset the step counter;
+                        # later chunks accumulate so TB/eval curves stay
+                        # continuous across worlds.
+                        reset_num_timesteps=(i == 0 and not resumed),
+                        tb_log_name=ctx.run_dir.name,
+                    )
+            else:
+                model.learn(
+                    total_timesteps=ctx.training.total_timesteps,
+                    callback=cb,
+                    reset_num_timesteps=not bool(ctx.training.resume_from),
+                    tb_log_name=ctx.run_dir.name,
+                )
         finally:
             ctx.save_model(
                 lambda p: model.save(str(p.with_suffix(""))),

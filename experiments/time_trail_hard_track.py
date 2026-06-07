@@ -29,14 +29,13 @@ To turn this into a single (non-HPO) training run, swap the bottom-of-file
 from gym_dr import (
     ContinuousActionSpaceConfig,
     ExperimentConfig,
-    ObjectAvoidanceConfig,
     Sb3Trainer,
     TrackingConfig,
     TrainingConfig,
     WorldsConfig,
-    object_avoidance_aware,
     study,
     time_trial,
+    center_line,
     existing_tracks,
 )
 from gym_dr.networks import DEEPRACER_CONV_PRESETS, DeepRacerCNN
@@ -48,7 +47,7 @@ from gym_dr.rewards import REWARD_VARIANTS
 # call at the bottom of the file (host orchestrator); the in-container worker
 # reads N_TRIALS_PER_WORKER from env vars set by the host.
 # --------------------------------------------------------------------------- #
-STUDY_NAME = "object_avoidance_1"
+STUDY_NAME = "time_trail_hard_track"
 N_TRIALS = 20
 N_PARALLEL = 7   # number of concurrent Docker workers (each runs its own simapp)
 SEED = 42        # int for reproducibility; None for nondeterministic
@@ -72,17 +71,7 @@ base = ExperimentConfig(
         },
         device="cuda",
     ),
-    reward=object_avoidance_aware,
-    # Fixed 4 static obstacles per episode for this study. min_spacing_m
-    # caps how close two obstacles can be on the centerline projection;
-    # 2.5 m gives the policy room to react on a 25 m track. Leaving
-    # terminate_on_collision=True (the AWS-faithful default) — so a crash
-    # ends the episode and CRASH_PENALTY shows up exactly once. Set False
-    # for safety-style training where the per-step cost persists.
-    object_avoidance=ObjectAvoidanceConfig(
-        n_obstacles=4,
-        min_spacing_m=2.5,
-    ),
+    reward=center_line,
     action_space=ContinuousActionSpaceConfig(
         steering_low=-30.0,
         steering_high=30.0,

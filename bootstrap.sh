@@ -12,10 +12,12 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ARCH_DEFAULT="cpu"
-UPSTREAM_REPO_DEFAULT="https://github.com/seresheim/deepracer-env.git"
+UPSTREAM_REPO_DEFAULT="https://github.com/Luna-v0/deepracer-env.git"
 UPSTREAM_DIR_DEFAULT="${PROJECT_DIR}/.deepracer-env-upstream"
 # Pinned upstream commit — a known-good ref. Override with -r or UPSTREAM_REF.
-UPSTREAM_REF_DEFAULT="979b095"
+# 25bfe5c packages the object_avoidance SDF data files; e7e2cec added the
+# object_avoidance feature; both layered on top of upstream 979b095.
+UPSTREAM_REF_DEFAULT="25bfe5c"
 MIN_FREE_GB_WARN=30
 MIN_FREE_GB_FAIL=20
 

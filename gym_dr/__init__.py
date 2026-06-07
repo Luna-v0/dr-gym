@@ -27,11 +27,14 @@ from gym_dr.config import (
     load_search_space,
 )
 from gym_dr.envs import time_trial
+from gym_dr.object_avoidance import ObjectAvoidanceConfig
+from gym_dr.seeding import ReplicateSeeds, SeedManager
 from gym_dr.rewards import (
     REWARD_VARIANTS,
     anti_zigzag,
     center_line,
     centerline_quadratic,
+    object_avoidance_aware,
     progress_and_speed,
     progress_per_step,
     progress_safe,
@@ -46,7 +49,10 @@ __all__ = [
     "DiscreteAction",
     "DiscreteActionSpaceConfig",
     "ExperimentConfig",
+    "ObjectAvoidanceConfig",
+    "ReplicateSeeds",
     "Sb3Trainer",
+    "SeedManager",
     "TRACKS",
     "TrackingConfig",
     "Trainer",
@@ -63,6 +69,7 @@ __all__ = [
     "inspect",
     "load_config",
     "load_search_space",
+    "object_avoidance_aware",
     "progress_and_speed",
     "progress_per_step",
     "progress_safe",

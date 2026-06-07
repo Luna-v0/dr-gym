@@ -150,6 +150,20 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     _update_status(run_dir, "initialized")
 
     env = env_wrapper(experiment.env_factory(experiment))
+
+    # Runtime multi-world rotation. When the host orchestrator runs a single
+    # container that rotates worlds in-process (GYM_DR_ROTATE=1), expand the
+    # WorldsConfig into a per-chunk plan the trainer walks via the env's
+    # set_world() track swap. Otherwise (HPO workers, direct single-world
+    # runs, the test stub) world_plan stays None and the trainer takes the
+    # legacy single-``model.learn`` path.
+    world_plan: list[str] | None = None
+    chunk_steps: int | None = None
+    if os.getenv("GYM_DR_ROTATE"):
+        worlds = experiment.worlds
+        world_plan = [w for _ in range(worlds.rotations) for w in worlds.names]
+        chunk_steps = worlds.chunk_steps
+
     ctx = TrainingContext(
         run_dir=run_dir,
         action_space=experiment.action_space,
@@ -157,6 +171,8 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
         trial=trial,
         seed=experiment.seed,
         metrics_state=metrics_state,
+        world_plan=world_plan,
+        chunk_steps=chunk_steps,
     )
 
     started_at = time.monotonic()

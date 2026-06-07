@@ -54,6 +54,14 @@ class StubDeepRacerEnv(gym.Env):
         self._reward_fn = reward_fn
         self._sensor_name = sensor_name
         self._step = 0
+        self.world = "stub_world"
+        self.set_world_calls: list[str] = []
+
+    def set_world(self, world_name):
+        """Mirror DeepRacerEnv.set_world's between-episodes contract for the
+        rotation test: record the swap and update the active world."""
+        self.set_world_calls.append(world_name)
+        self.world = world_name
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -178,6 +186,37 @@ def test_per_chunk_env_overrides_apply(container_mode):
     # CHUNK_NAME overrode the experiment name
     assert (tmp_path / "artifacts" / "override_run").exists()
     assert not (tmp_path / "artifacts" / "base_name").exists()
+
+
+def test_runtime_world_rotation_swaps_in_process(container_mode, monkeypatch):
+    """With GYM_DR_ROTATE=1 and a multi-world WorldsConfig, the trainer runs
+    one in-process rotation and calls env.set_world() once per world after the
+    first — no second container, no checkpoint reload between worlds."""
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    # Capture set_world calls across the (wrapped, vec-env'd) stub instance.
+    calls: list[str] = []
+    orig_set_world = StubDeepRacerEnv.set_world
+
+    def _recording_set_world(self, world_name):
+        calls.append(world_name)
+        return orig_set_world(self, world_name)
+
+    monkeypatch.setattr(StubDeepRacerEnv, "set_world", _recording_set_world)
+
+    exp = _experiment("rotation_run", tmp_path, total_timesteps=64).with_overrides(
+        worlds=WorldsConfig(names=["world_a", "world_b"], chunk_steps=64, rotations=2),
+    )
+    result = train(exp)
+    assert isinstance(result, float)
+
+    # Plan = [a, b, a, b]; first chunk uses the already-loaded world, so three
+    # set_world swaps happen, ending on world_b.
+    assert calls == ["world_b", "world_a", "world_b"], calls
+
+    run_dir = tmp_path / "artifacts" / "rotation_run"
+    assert (run_dir / "latest_model.zip").exists()
 
 
 def test_custom_reward_archived(container_mode):

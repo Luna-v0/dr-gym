@@ -14,11 +14,13 @@ import math
 import pytest
 
 from gym_dr.rewards import (
+    CRASH_PENALTY,
     OFFTRACK_PENALTY,
     REWARD_VARIANTS,
     anti_zigzag,
     center_line,
     centerline_quadratic,
+    object_avoidance_aware,
     progress_and_speed,
     progress_per_step,
     progress_safe,
@@ -136,6 +138,38 @@ def test_progress_safe_is_default_eval_reward():
     from gym_dr.config import ExperimentConfig
     exp = ExperimentConfig(name="t")
     assert exp.eval_reward is progress_safe
+
+
+def test_object_avoidance_aware_crash_penalty():
+    """A crash flag must dominate every other reward shaping — the only
+    way back to a positive reward is to not crash."""
+    r = object_avoidance_aware(_full_params(is_crashed=True))
+    assert r == CRASH_PENALTY
+    assert CRASH_PENALTY < 0
+
+
+def test_object_avoidance_aware_lane_commit_bonus():
+    """When an obstacle is ahead, riding off-centerline must reward more
+    than riding the centerline straight at it."""
+    committed = object_avoidance_aware(_full_params(
+        closest_objects=[-1, 3], distance_from_center=0.25,
+    ))
+    centered = object_avoidance_aware(_full_params(
+        closest_objects=[-1, 3], distance_from_center=0.0,
+    ))
+    assert committed > centered
+
+
+def test_object_avoidance_aware_no_bonus_without_obstacle():
+    """With no obstacle ahead (next_obj_idx == -1), distance_from_center
+    must not affect the reward — there's nothing to commit to."""
+    near = object_avoidance_aware(_full_params(
+        closest_objects=[-1, -1], distance_from_center=0.0,
+    ))
+    far = object_avoidance_aware(_full_params(
+        closest_objects=[-1, -1], distance_from_center=0.4,
+    ))
+    assert near == far
 
 
 def test_waypoint_anticipation_uses_track_geometry():
