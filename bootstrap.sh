@@ -14,21 +14,22 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCH_DEFAULT="cpu"
 UPSTREAM_REPO_DEFAULT="https://github.com/Luna-v0/deepracer-env.git"
 UPSTREAM_DIR_DEFAULT="${PROJECT_DIR}/.deepracer-env-upstream"
-# Pinned upstream commit — a known-good ref. Override with -r or UPSTREAM_REF.
-# 25bfe5c packages the object_avoidance SDF data files; e7e2cec added the
-# object_avoidance feature; both layered on top of upstream 979b095.
-UPSTREAM_REF_DEFAULT="25bfe5c"
+
+# Upstream branch to track. Fresh clones use its latest tip; re-runs offer to
+# pull when it has advanced. Override with -b or UPSTREAM_BRANCH.
+UPSTREAM_BRANCH_DEFAULT="main"
+
 MIN_FREE_GB_WARN=30
 MIN_FREE_GB_FAIL=20
 
 ARCH="${ARCH:-${ARCH_DEFAULT}}"
 UPSTREAM_REPO="${UPSTREAM_REPO:-${UPSTREAM_REPO_DEFAULT}}"
 UPSTREAM_DIR="${UPSTREAM_DIR:-${UPSTREAM_DIR_DEFAULT}}"
-UPSTREAM_REF="${UPSTREAM_REF:-${UPSTREAM_REF_DEFAULT}}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-${UPSTREAM_BRANCH_DEFAULT}}"
 
 usage() {
   cat <<EOF
-Usage: ./bootstrap.sh [-a cpu|gpu] [-u UPSTREAM_DIR] [-r UPSTREAM_REF] [-h]
+Usage: ./bootstrap.sh [-a cpu|gpu] [-u UPSTREAM_DIR] [-b UPSTREAM_BRANCH] [-h|--help]
 
 Builds the upstream deepracer-env simulator image (from
 ${UPSTREAM_REPO_DEFAULT}) and then the project training image. Idempotent —
@@ -38,22 +39,30 @@ Options:
   -a ARCH            Architecture: cpu (default) or gpu.
   -u UPSTREAM_DIR    Where to clone/find the upstream source.
                      Default: ${UPSTREAM_DIR_DEFAULT}
-  -r UPSTREAM_REF    Upstream git ref to check out after clone.
-                     Default: ${UPSTREAM_REF_DEFAULT}
-  -h                 Show this help.
+  -b UPSTREAM_BRANCH Upstream branch to track (its latest tip is used).
+                     Default: ${UPSTREAM_BRANCH_DEFAULT}
+  -h, --help         Show this help.
 
 Environment variables (overridden by the flags above):
-  ARCH, UPSTREAM_DIR, UPSTREAM_REF, UPSTREAM_REPO, PROJECT_IMAGE
+  ARCH, UPSTREAM_DIR, UPSTREAM_BRANCH, UPSTREAM_REPO, PROJECT_IMAGE
 
 Disk: the upstream build needs ~50 GB free in Docker's storage location.
 EOF
 }
 
-while getopts ":a:u:r:h" opt; do
+# getopts handles short flags only; translate the long --help alias first.
+for arg in "$@"; do
+  case "${arg}" in
+    --help) usage; exit 0 ;;
+    --) break ;;
+  esac
+done
+
+while getopts ":a:u:b:h" opt; do
   case "${opt}" in
     a) ARCH="${OPTARG}" ;;
     u) UPSTREAM_DIR="${OPTARG}" ;;
-    r) UPSTREAM_REF="${OPTARG}" ;;
+    b) UPSTREAM_BRANCH="${OPTARG}" ;;
     h) usage; exit 0 ;;
     \?) echo "Unknown option: -${OPTARG}" >&2; usage; exit 2 ;;
     :)  echo "Option -${OPTARG} requires a value" >&2; usage; exit 2 ;;
@@ -105,27 +114,65 @@ fi
 
 echo "Docker daemon, buildx, git: OK."
 
+# ---------- Upstream source + update check ----------
+#
+# Fresh machine: clone the upstream repo and build from the latest tip of the
+# tracked branch. Re-run: if the branch has advanced on the remote, offer to
+# pull it and rebuild the base image; otherwise reuse what's there.
+
+REBUILD_BASE=0
+BASE_PRESENT=0
+docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1 && BASE_PRESENT=1
+
+step "Checking upstream (${UPSTREAM_REPO}, branch ${UPSTREAM_BRANCH})"
+
+if [[ ! -d "${UPSTREAM_DIR}/.git" ]]; then
+  if (( BASE_PRESENT == 1 )); then
+    echo "Base image present and no local checkout — nothing to update."
+  else
+    step "Cloning upstream into ${UPSTREAM_DIR}"
+    git clone --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" "${UPSTREAM_DIR}"
+    echo "Cloned ${UPSTREAM_BRANCH} at $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)."
+  fi
+elif ! git -C "${UPSTREAM_DIR}" fetch --quiet origin; then
+  echo "Warning: 'git fetch' on upstream failed (offline?) — using current checkout."
+else
+  REMOTE_REF="origin/${UPSTREAM_BRANCH}"
+  LOCAL_SHA="$(git -C "${UPSTREAM_DIR}" rev-parse HEAD)"
+  REMOTE_SHA="$(git -C "${UPSTREAM_DIR}" rev-parse --verify --quiet "${REMOTE_REF}^{commit}" 2>/dev/null || true)"
+  if [[ -z "${REMOTE_SHA}" ]]; then
+    echo "Could not resolve ${REMOTE_REF} — using current checkout."
+  elif [[ "${LOCAL_SHA}" == "${REMOTE_SHA}" ]]; then
+    echo "Upstream is up to date with ${REMOTE_REF} ($(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD))."
+  else
+    BEHIND="$(git -C "${UPSTREAM_DIR}" rev-list --count "${LOCAL_SHA}..${REMOTE_SHA}" 2>/dev/null || echo "?")"
+    echo "Upstream ${REMOTE_REF} ($(git -C "${UPSTREAM_DIR}" rev-parse --short "${REMOTE_SHA}")) is ${BEHIND} commit(s) ahead of your checkout ($(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD))."
+    DO_UPDATE=0
+    if [[ ! -t 0 ]]; then
+      echo "Non-interactive shell — keeping current checkout."
+    else
+      read -r -p "Pull the latest ${UPSTREAM_BRANCH} and rebuild the base image? [y/N] " REPLY
+      [[ "${REPLY}" =~ ^[Yy]$ ]] && DO_UPDATE=1
+    fi
+    if (( DO_UPDATE == 1 )); then
+      step "Updating upstream to ${REMOTE_REF}"
+      git -C "${UPSTREAM_DIR}" checkout -B "${UPSTREAM_BRANCH}" "${REMOTE_REF}"
+      echo "Upstream now at $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)."
+      REBUILD_BASE=1
+    else
+      echo "Keeping current checkout."
+    fi
+  fi
+fi
+
 # ---------- Base image (upstream) ----------
 
 step "Checking base image: ${BASE_IMAGE}"
-if docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
+if (( BASE_PRESENT == 1 )) && (( REBUILD_BASE == 0 )); then
   echo "Base image already present, skipping upstream build."
 else
-  if [[ ! -d "${UPSTREAM_DIR}/.git" ]]; then
-    step "Cloning upstream into ${UPSTREAM_DIR}"
-    git clone "${UPSTREAM_REPO}" "${UPSTREAM_DIR}"
-  else
-    echo "Upstream source already at ${UPSTREAM_DIR}."
-  fi
-
-  step "Pinning upstream to ${UPSTREAM_REF}"
-  if ! git -C "${UPSTREAM_DIR}" cat-file -e "${UPSTREAM_REF}^{commit}" 2>/dev/null; then
-    git -C "${UPSTREAM_DIR}" fetch --all --tags
-  fi
-  CURRENT_HEAD="$(git -C "${UPSTREAM_DIR}" rev-parse HEAD)"
-  PINNED_SHA="$(git -C "${UPSTREAM_DIR}" rev-parse "${UPSTREAM_REF}^{commit}")"
-  if [[ "${CURRENT_HEAD}" != "${PINNED_SHA}" ]]; then
-    git -C "${UPSTREAM_DIR}" -c advice.detachedHead=false checkout "${PINNED_SHA}"
+  if (( REBUILD_BASE == 1 )); then
+    echo "Rebuilding base image to pick up the updated upstream source."
   fi
   echo "Upstream HEAD: $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)"
 
