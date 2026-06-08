@@ -93,6 +93,113 @@ class CtxEvalCallback(EvalCallback):
         return proceed
 
 
+class MultiWorldEvalCallback(BaseCallback):
+    """Evaluate across an ordered, held-out set of worlds (track generalisation).
+
+    Used by ``Sb3Trainer`` when ``ctx.eval_worlds`` is set (e.g. the
+    :class:`~gym_dr.worlds.OrderedSplit` strategy). At each eval trigger it:
+
+    1. flips ``metrics_state.use_eval_reward`` so the eval reward is measured,
+    2. swaps the (shared) Gazebo env to each world in ``eval_worlds`` via
+       ``set_world``, running ``n_eval_episodes`` per world,
+    3. restores the world training was on (read from ``metrics_state.world_name``,
+       which ``Sb3Trainer.fit`` keeps current per chunk),
+    4. reports the mean-across-worlds as the eval metric (per-world means are
+       logged as ``eval/<world>_mean_reward``), and saves ``best_model`` on
+       improvement.
+
+    Exposes ``last_mean_reward`` so the trainer can read the final eval score
+    the same way it does for ``CtxEvalCallback``.
+    """
+
+    def __init__(
+        self,
+        *,
+        ctx,
+        eval_worlds: list[str],
+        eval_freq: int,
+        n_eval_episodes: int,
+        best_model_save_path: str | None = None,
+        deterministic: bool = True,
+    ) -> None:
+        super().__init__()
+        self._ctx = ctx
+        self.eval_worlds = list(eval_worlds)
+        self.eval_freq = max(1, eval_freq)
+        self.n_eval_episodes = n_eval_episodes
+        self.best_model_save_path = best_model_save_path
+        self.deterministic = deterministic
+        self.last_mean_reward = float("nan")
+        self.best_mean_reward = -float("inf")
+
+    def _swap(self, vec, world: str) -> None:
+        import numpy as np
+
+        vec.env_method("set_world", world)
+        self.model._last_obs = vec.reset()
+        self.model._last_episode_starts = np.ones((vec.num_envs,), dtype=bool)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.eval_freq != 0:
+            return True
+
+        import numpy as np
+        from stable_baselines3.common.evaluation import evaluate_policy
+
+        state = getattr(self._ctx, "metrics_state", None)
+        train_world = getattr(state, "world_name", None)
+        vec = self.model.get_env()
+
+        per_world: dict[str, float] = {}
+        if state is not None:
+            state.use_eval_reward = True
+        try:
+            for world in self.eval_worlds:
+                self._swap(vec, world)
+                mean_reward, _ = evaluate_policy(
+                    self.model,
+                    vec,
+                    n_eval_episodes=self.n_eval_episodes,
+                    deterministic=self.deterministic,
+                    warn=False,
+                )
+                per_world[world] = float(mean_reward)
+            # Restore the world training was on so the next rollout continues
+            # on the right track (the env is shared with training).
+            if train_world is not None:
+                self._swap(vec, train_world)
+        finally:
+            if state is not None:
+                state.use_eval_reward = False
+
+        agg = float(np.mean(list(per_world.values()))) if per_world else float("nan")
+        self.last_mean_reward = agg
+        for world, m in per_world.items():
+            self.logger.record(f"eval/{world}_mean_reward", m)
+        self.logger.record("eval/mean_reward", agg)
+        self.logger.record("eval/n_worlds", float(len(per_world)))
+
+        if per_world and agg > self.best_mean_reward:
+            self.best_mean_reward = agg
+            self._save_best()
+
+        self._ctx.report_eval(agg, int(self.num_timesteps))
+        return True
+
+    def _save_best(self) -> None:
+        if not self.best_model_save_path:
+            return
+        from gym_dr.action_space import write_model_metadata
+
+        best_dir = Path(self.best_model_save_path)
+        best_dir.mkdir(parents=True, exist_ok=True)
+        best_zip = best_dir / "best_model.zip"
+        self.model.save(str(best_zip.with_suffix("")))
+        write_model_metadata(
+            best_zip.with_suffix(".model_metadata.json"), self._ctx.action_space
+        )
+
+
 class StatusJsonCallback(BaseCallback):
     def __init__(
         self,

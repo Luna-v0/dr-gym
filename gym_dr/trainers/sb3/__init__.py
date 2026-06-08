@@ -16,6 +16,7 @@ from gym_dr.trainers.sb3.callbacks import (
     CtxCheckpointCallback,
     CtxEvalCallback,
     MlflowMirrorCallback,
+    MultiWorldEvalCallback,
     RewardMetricsCallback,
     StatusJsonCallback,
     WallClockLimitCallback,
@@ -72,6 +73,34 @@ class Sb3Trainer:
     policy implicit temporal context (velocity, acceleration cues). For
     Dict obs (DeepRacer's ``FRONT_FACING_CAMERA``) SB3 stacks each key
     independently along its first axis. Typical sweep range: 1–4."""
+
+    # Process-global (NOT a dataclass field — no annotation, so it stays off
+    # __init__/asdict): has any training chunk run in THIS worker container yet?
+    # An HPO worker runs several trials back-to-back in one container and the
+    # Gazebo world persists across them. The very first trial can trust the
+    # container's boot WORLD_NAME and must NOT call set_world before the env's
+    # first reset (upstream raises "only valid between episodes"). Every later
+    # trial inherits whatever world the previous trial's rotation left loaded,
+    # so it has to pin the track back to world_plan[0] before chunk 0. See fit().
+    _boot_world_consumed = False
+
+    @staticmethod
+    def _swap_world(model: Any, world: str) -> None:
+        """Swap the live Gazebo track to *world* and re-sync SB3's rollout state.
+
+        Calls ``DeepRacerEnv.set_world`` through the vec-env (``env_method``
+        forwards the call down through every VecEnvWrapper and gym wrapper to
+        the base env), then resets the env on the new world and points SB3's
+        ``_last_obs`` / ``_last_episode_starts`` at that fresh observation so
+        the next ``model.learn(reset_num_timesteps=False)`` rolls out on the
+        new track instead of continuing from a stale frame.
+        """
+        import numpy as np
+
+        vec = model.get_env()
+        vec.env_method("set_world", world)
+        model._last_obs = vec.reset()
+        model._last_episode_starts = np.ones((vec.num_envs,), dtype=bool)
 
     def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
         from stable_baselines3.common.callbacks import CallbackList
@@ -188,33 +217,95 @@ class Sb3Trainer:
             )
             callbacks.append(wall_clock_callback)
 
-        # Use model.get_env() so the eval env carries the same SB3-applied
-        # wrappers (VecTransposeImage on top of our VecFrameStack/DummyVecEnv).
-        # Without this, SB3 warns "Training and eval env are not of the same
-        # type" because it transposes image obs for the training env but not
-        # for an eval env passed in raw.
-        eval_callback = CtxEvalCallback(
-            eval_env=model.get_env(),
-            ctx=ctx,
-            best_model_save_path=str(best_model_dir),
-            log_path=str(eval_log_dir),
-            eval_freq=max(1, ctx.training.eval_freq),
-            n_eval_episodes=ctx.training.n_eval_episodes,
-            deterministic=True,
-            render=False,
-        )
+        # Evaluation. When the strategy supplies a held-out eval world list
+        # (OrderedSplit), measure track generalisation across those worlds;
+        # otherwise evaluate on the current training world via SB3's
+        # EvalCallback. Both expose ``last_mean_reward`` for the TrainResult.
+        if ctx.eval_worlds:
+            eval_callback: Any = MultiWorldEvalCallback(
+                ctx=ctx,
+                eval_worlds=ctx.eval_worlds,
+                eval_freq=max(1, ctx.training.eval_freq),
+                n_eval_episodes=ctx.training.n_eval_episodes,
+                best_model_save_path=str(best_model_dir),
+                deterministic=True,
+            )
+        else:
+            # Use model.get_env() so the eval env carries the same SB3-applied
+            # wrappers (VecTransposeImage on top of our VecFrameStack/DummyVecEnv).
+            # Without this, SB3 warns "Training and eval env are not of the same
+            # type" because it transposes image obs for the training env but not
+            # for an eval env passed in raw.
+            eval_callback = CtxEvalCallback(
+                eval_env=model.get_env(),
+                ctx=ctx,
+                best_model_save_path=str(best_model_dir),
+                log_path=str(eval_log_dir),
+                eval_freq=max(1, ctx.training.eval_freq),
+                n_eval_episodes=ctx.training.n_eval_episodes,
+                deterministic=True,
+                render=False,
+            )
         callbacks.append(eval_callback)
 
         # Unified naming: SB3's default TB subdir is "<AlgoClass>_<auto_idx>"
         # (e.g. PPO_1). Naming it after the run makes the TB sidebar legible
         # and matches the MLflow run name + the Optuna trial.user_attr.
         try:
-            model.learn(
-                total_timesteps=ctx.training.total_timesteps,
-                callback=CallbackList(callbacks),
-                reset_num_timesteps=not bool(ctx.training.resume_from),
-                tb_log_name=ctx.run_dir.name,
-            )
+            cb = CallbackList(callbacks)
+            if ctx.world_plan:
+                # In-container runtime rotation: train chunk_steps per world,
+                # swapping the track between chunks WITHOUT restarting Gazebo.
+                # The model (weights + PPO optimizer state) and the env persist
+                # across swaps — that is the whole point of doing it in one
+                # process instead of one container per (rotation, world).
+                chunk_steps = ctx.chunk_steps or ctx.training.total_timesteps
+                resumed = bool(ctx.training.resume_from)
+                # Reused worker container (2nd+ trial in this process): the live
+                # Gazebo world is whatever the previous trial's rotation left.
+                # Establish one episode so set_world's between-episodes contract
+                # holds, then pin the track to world_plan[0] before chunk 0.
+                # set_world is idempotent, so on the rare path where the stale
+                # world already equals world_plan[0] this is just a clean
+                # rebuild. The first trial skips this and trusts the boot world.
+                reused_container = type(self)._boot_world_consumed
+                # Mark up front: any later trial must treat the world as dirty
+                # even if this trial crashes partway through the rotation.
+                type(self)._boot_world_consumed = True
+                if reused_container:
+                    model._last_obs = model.get_env().reset()
+                    self._swap_world(model, ctx.world_plan[0])
+                for i, world in enumerate(ctx.world_plan):
+                    if i > 0:
+                        self._swap_world(model, world)
+                    # Stamp the trace's world context so every step row written
+                    # this chunk carries the right hot-swapped world + a chunk
+                    # counter that distinguishes repeated rotations of the same
+                    # world (docs/trace-contract.md §2).
+                    if ctx.metrics_state is not None:
+                        ctx.metrics_state.world_name = world
+                        ctx.metrics_state.chunk_index = i
+                    print(
+                        f"[Sb3Trainer] chunk {i + 1}/{len(ctx.world_plan)}: "
+                        f"world={world!r} steps={chunk_steps}",
+                        flush=True,
+                    )
+                    model.learn(
+                        total_timesteps=chunk_steps,
+                        callback=cb,
+                        # Only the very first chunk may reset the step counter;
+                        # later chunks accumulate so TB/eval curves stay
+                        # continuous across worlds.
+                        reset_num_timesteps=(i == 0 and not resumed),
+                        tb_log_name=ctx.run_dir.name,
+                    )
+            else:
+                model.learn(
+                    total_timesteps=ctx.training.total_timesteps,
+                    callback=cb,
+                    reset_num_timesteps=not bool(ctx.training.resume_from),
+                    tb_log_name=ctx.run_dir.name,
+                )
         finally:
             ctx.save_model(
                 lambda p: model.save(str(p.with_suffix(""))),

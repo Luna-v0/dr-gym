@@ -11,15 +11,26 @@ kwarg to ``DeepRacerEnv``:
 
 Reference: ``.deepracer-env-upstream/deepracer_env/reset/constants.py:21``.
 
-To add support for another race type, write a sibling factory under
-``gym_dr/envs/`` that passes the appropriate ``config={'race_type': '...'}``
-to ``DeepRacerEnv``, and re-export it from ``gym_dr/envs/__init__.py``.
+Static-obstacle Object Avoidance is not a separate race type in our fork —
+it's a feature toggle on the env (``object_avoidance=`` kwarg on
+``DeepRacerEnv``). This factory enables it when
+``experiment.object_avoidance`` is set, otherwise the env runs pure
+time-trial.
 
-``world_name`` is **not** a kwarg to the env. The simapp reads it once at
-container startup from the ``WORLD_NAME`` environment variable
-(``.deepracer-env-upstream/deepracer_env/track_geom/track_data.py:186``). This
-factory cannot change the world; the host orchestrator does that by
-respawning the container with a different ``WORLD_NAME``.
+To add support for another upstream race type (head-to-head, F1), write a
+sibling factory under ``gym_dr/envs/`` that passes the appropriate
+``config={'race_type': '...'}`` to ``DeepRacerEnv``, and re-export it
+from ``gym_dr/envs/__init__.py``.
+
+``world_name`` is **not** a kwarg to the env. The simapp loads
+``WORLD_NAME`` once at container startup
+(``.deepracer-env-upstream/deepracer_env/track_geom/track_data.py:186``), so
+this factory builds the env on the *first* world. To change tracks afterwards,
+call ``env.set_world(name)`` at runtime — upstream now swaps the Gazebo track
+in place without restarting the container (the trainer does this between
+chunks for multi-world rotation). ``set_world`` is reachable straight through
+the ``ActionBounds`` / ``GrayscaleObs`` wrappers this factory returns, since
+gymnasium wrappers forward unknown attributes to the base env.
 """
 from __future__ import annotations
 
@@ -50,9 +61,14 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     from gym_dr.action_space import ContinuousActionSpaceConfig
     from gym_dr.envs.wrappers import ActionBounds, GrayscaleObs
 
+    oa_cfg = experiment.object_avoidance
+    upstream_oa = (
+        oa_cfg.to_upstream() if oa_cfg is not None and oa_cfg.enabled else None
+    )
     env = DeepRacerEnv(
         reward_fn=experiment.reward,
         sensors=list(experiment.action_space.sensor),
+        object_avoidance=upstream_oa,
     )
     # Enforce ``ContinuousActionSpaceConfig`` bounds at the wrapper level.
     # Upstream's default action space is ``Box([-30, 0.1], [30, 4.0])`` and its

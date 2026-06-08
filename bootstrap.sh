@@ -12,10 +12,12 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ARCH_DEFAULT="cpu"
-UPSTREAM_REPO_DEFAULT="https://github.com/seresheim/deepracer-env.git"
+UPSTREAM_REPO_DEFAULT="https://github.com/Luna-v0/deepracer-env.git"
 UPSTREAM_DIR_DEFAULT="${PROJECT_DIR}/.deepracer-env-upstream"
 # Pinned upstream commit — a known-good ref. Override with -r or UPSTREAM_REF.
-UPSTREAM_REF_DEFAULT="979b095"
+# 25bfe5c packages the object_avoidance SDF data files; e7e2cec added the
+# object_avoidance feature; both layered on top of upstream 979b095.
+UPSTREAM_REF_DEFAULT="25bfe5c"
 MIN_FREE_GB_WARN=30
 MIN_FREE_GB_FAIL=20
 
@@ -143,7 +145,7 @@ docker build \
 
 step "Sanity-checking ${PROJECT_IMAGE}"
 SANITY_OUT="$(docker run --rm --entrypoint python3 "${PROJECT_IMAGE}" \
-  -c "import stable_baselines3 as sb3, mlflow, optuna; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__)" 2>&1)" || {
+  -c "import stable_baselines3 as sb3, mlflow, optuna, pandas, pyarrow; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__, 'pandas', pandas.__version__, 'pyarrow', pyarrow.__version__)" 2>&1)" || {
   echo "${SANITY_OUT}" >&2
   fail "Project image built but failed the import sanity check. Inspect the output above."
 }

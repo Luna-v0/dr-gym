@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from gym_dr.action_space import ActionSpaceConfig, ContinuousActionSpaceConfig
+from gym_dr.object_avoidance import ObjectAvoidanceConfig
+from gym_dr.worlds import SequentialRotation, WorldStrategy
 
 if TYPE_CHECKING:
     from gym_dr.trainers.base import Trainer
@@ -131,12 +133,12 @@ class TrackingConfig:
 class WorldsConfig:
     """Worlds to rotate through during a single training run.
 
-    Multi-world runs use *sequential rotation with shared policy*: the
-    orchestrator trains for ``chunk_steps`` timesteps on the first world,
-    saves a checkpoint, restarts the container with the next ``WORLD_NAME``
-    and ``RESUME_FROM`` pointing at that checkpoint, and continues. The
-    optimizer state and weights persist across switches (off-policy replay
-    buffers, if any, are lost — PPO has none).
+    Multi-world runs use *sequential rotation with shared policy* inside a
+    single container: the trainer trains ``chunk_steps`` timesteps on the
+    first world, then calls ``DeepRacerEnv.set_world`` to swap the Gazebo
+    track in place (no container restart, no gzserver restart) and continues.
+    The policy weights and PPO optimizer state stay in memory across swaps
+    (off-policy replay buffers, if any, would be lost — PPO has none).
 
     Example::
 
@@ -149,10 +151,9 @@ class WorldsConfig:
     runs 6 chunks of 20k timesteps each:
     reinvent_base -> Bowtie_track -> reinvent_base -> ... -> Bowtie_track.
 
-    For valid world names see ``.deepracer-env-upstream/tracks.txt``. The
-    current upstream simapp loads the world at container startup and cannot
-    switch at runtime; see the README's "Future work" section for the
-    runtime-switch design.
+    For valid world names see ``.deepracer-env-upstream/tracks.txt``. Upstream
+    swaps the world at runtime via ``DeepRacerEnv.set_world``, so the whole
+    rotation runs in one container.
     """
 
     names: list[str] = field(default_factory=lambda: ["reinvent_base"])
@@ -160,9 +161,9 @@ class WorldsConfig:
     training. The list order is the rotation order within each pass."""
 
     chunk_steps: int = 50_000
-    """Timesteps to train per ``(rotation, world)`` chunk. Each chunk runs
-    in its own Docker container and resumes from the previous chunk's
-    ``latest_model.zip``."""
+    """Timesteps to train per ``(rotation, world)`` chunk before swapping the
+    track at runtime. All chunks run in one container with one persistent
+    policy + Gazebo process (see the class docstring)."""
 
     rotations: int = 1
     """How many full passes through ``names``. With ``rotations=1`` and a
@@ -176,6 +177,26 @@ class WorldsConfig:
         # it to a one-element list so the intent (one world) is honoured.
         if isinstance(self.names, str):
             object.__setattr__(self, "names", [self.names])
+
+
+@dataclass(frozen=True)
+class TraceConfig:
+    """Per-step Tier-1 trace sink (see ``docs/trace-contract.md``).
+
+    When ``enabled``, the metrics wrapper writes one row per env step to
+    per-episode Parquet shards under ``artifacts/<chunk>/trace/steps/`` — the
+    simtrace-equivalent that the analysis layer reads via
+    ``gym_dr.trace.load_steps``. Off by default: a long HPO study would emit a
+    shard per episode across hundreds of trials, so turn it on for the analysis
+    runs you actually want to dissect.
+    """
+
+    enabled: bool = False
+    """Write the per-step trace. Default ``False`` (HPO-safe)."""
+
+    compression: str = "snappy"
+    """Parquet codec passed to ``DataFrame.to_parquet``. ``snappy`` (fast,
+    default), ``zstd`` (smaller), or ``None`` for uncompressed."""
 
 
 def _default_env_factory():
@@ -220,9 +241,11 @@ class ExperimentConfig:
     Plug-in points
     --------------
     - ``env_factory``: swap the env. Default ``gym_dr.envs.time_trial`` builds
-      a single-agent time-trial ``DeepRacerEnv``. To use a different race
-      type (object avoidance etc.) or a future env version, write a sibling
-      factory under ``gym_dr/envs/`` and reference it here.
+      a single-agent time-trial ``DeepRacerEnv`` and conditionally enables
+      static-obstacle Object Avoidance when ``object_avoidance`` is set.
+      To use a different upstream race type (head-to-head, F1) or a future
+      env version, write a sibling factory under ``gym_dr/envs/`` and
+      reference it here.
     - ``trainer``: swap the RL algorithm/library. Default
       ``gym_dr.trainers.Sb3Trainer()`` wraps SB3 PPO/SAC/TD3/A2C/DDPG. Any
       object with ``fit(env, ctx) -> TrainResult`` satisfies the protocol.
@@ -270,7 +293,27 @@ class ExperimentConfig:
 
     worlds: WorldsConfig = field(default_factory=WorldsConfig)
     """List of worlds to rotate through. Single-world runs use a list of one
-    (the default: ``["reinvent_base"]``)."""
+    (the default: ``["reinvent_base"]``). Ignored when ``world_strategy`` is
+    set — see :meth:`effective_strategy`."""
+
+    world_strategy: WorldStrategy | None = None
+    """Optional world-scheduling strategy (``gym_dr.worlds``). When set it
+    *supersedes* ``worlds``, deciding both the training world order and the
+    (possibly held-out) evaluation worlds. ``None`` (default) falls back to a
+    :class:`~gym_dr.worlds.SequentialRotation` built from ``worlds`` — so
+    existing configs behave exactly as before. Use
+    :class:`~gym_dr.worlds.OrderedSplit` to train on one ordered list and
+    evaluate on another."""
+
+    object_avoidance: ObjectAvoidanceConfig | None = None
+    """Optional static-obstacle Object Avoidance settings. ``None`` (the
+    default) keeps training pure time-trial. Set to an
+    :class:`ObjectAvoidanceConfig` instance to spawn obstacles each
+    episode — the ``time_trial`` env factory will translate it to upstream
+    and forward to ``DeepRacerEnv(object_avoidance=...)``. Pair with
+    :func:`gym_dr.rewards.object_avoidance_aware` (or your own reward) to
+    consume the resulting ``is_crashed`` / ``closest_objects`` reward
+    params."""
 
     training: TrainingConfig = field(default_factory=TrainingConfig)
     """Per-chunk training control: timesteps, eval/checkpoint frequencies,
@@ -278,6 +321,11 @@ class ExperimentConfig:
 
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     """MLflow + TensorBoard settings."""
+
+    trace: TraceConfig = field(default_factory=TraceConfig)
+    """Per-step Tier-1 trace sink. Off by default; enable to dump the
+    simtrace-equivalent Parquet shards for offline analysis (see
+    ``docs/trace-contract.md`` and ``gym_dr/trace.py``)."""
 
     enable_gui: bool = False
     """When ``True``, the simapp boots Gazebo with its GUI/VNC enabled. The
@@ -311,6 +359,23 @@ class ExperimentConfig:
     even at a fixed seed — expect some run-to-run variance from the
     simulator regardless."""
 
+    def effective_strategy(self) -> WorldStrategy:
+        """The world schedule actually used for this run.
+
+        Returns ``world_strategy`` when set, else a
+        :class:`~gym_dr.worlds.SequentialRotation` derived from ``worlds`` —
+        so the strategy pattern is the single source of truth for world order
+        and evaluation worlds, whether or not the user opted into a custom
+        strategy.
+        """
+        if self.world_strategy is not None:
+            return self.world_strategy
+        return SequentialRotation(
+            names=list(self.worlds.names),
+            chunk_steps=self.worlds.chunk_steps,
+            rotations=self.worlds.rotations,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON dump / MLflow logging.
 
@@ -329,8 +394,17 @@ class ExperimentConfig:
                 "action_space_type": self.action_space.action_space_type,
             },
             "worlds": dataclasses.asdict(self.worlds),
+            "world_strategy": (
+                _describe(self.world_strategy) if self.world_strategy is not None else None
+            ),
+            "object_avoidance": (
+                dataclasses.asdict(self.object_avoidance)
+                if self.object_avoidance is not None
+                else None
+            ),
             "training": dataclasses.asdict(self.training),
             "tracking": dataclasses.asdict(self.tracking),
+            "trace": dataclasses.asdict(self.trace),
             "enable_gui": self.enable_gui,
             "use_gpu": self.use_gpu,
             "seed": self.seed,
