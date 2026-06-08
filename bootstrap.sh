@@ -12,11 +12,13 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ARCH_DEFAULT="cpu"
-UPSTREAM_REPO_DEFAULT="https://github.com/seresheim/deepracer-env.git"
+UPSTREAM_REPO_DEFAULT="https://github.com/Luna-v0/deepracer-env.git"
 UPSTREAM_DIR_DEFAULT="${PROJECT_DIR}/.deepracer-env-upstream"
+
 # Upstream branch to track. Fresh clones use its latest tip; re-runs offer to
 # pull when it has advanced. Override with -b or UPSTREAM_BRANCH.
 UPSTREAM_BRANCH_DEFAULT="main"
+
 MIN_FREE_GB_WARN=30
 MIN_FREE_GB_FAIL=20
 
@@ -190,7 +192,7 @@ docker build \
 
 step "Sanity-checking ${PROJECT_IMAGE}"
 SANITY_OUT="$(docker run --rm --entrypoint python3 "${PROJECT_IMAGE}" \
-  -c "import stable_baselines3 as sb3, mlflow, optuna; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__)" 2>&1)" || {
+  -c "import stable_baselines3 as sb3, mlflow, optuna, pandas, pyarrow; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__, 'pandas', pandas.__version__, 'pyarrow', pyarrow.__version__)" 2>&1)" || {
   echo "${SANITY_OUT}" >&2
   fail "Project image built but failed the import sanity check. Inspect the output above."
 }

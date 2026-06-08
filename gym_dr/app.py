@@ -3,23 +3,35 @@
 The user's ``app.py`` ends with ``if __name__ == "__main__": train(experiment)``.
 Running ``python app.py`` from the host kicks off the *host orchestrator*:
 the orchestrator pre-generates ``model_metadata.json`` and then ``docker run``s
-one or more container chunks, each with a different ``WORLD_NAME``. Inside
-each container the same ``app.py`` runs, but ``train()`` detects worker mode
-via the ``GYM_DR_IN_CONTAINER`` env var and runs a single training chunk.
+a *single* container that trains the entire multi-world rotation in-process.
+Gazebo loads ``worlds.names[0]`` at startup; the in-container trainer then
+swaps tracks between chunks at runtime via ``DeepRacerEnv.set_world`` — no
+container restart per ``(rotation, world)``. Inside the container the same
+``app.py`` runs, but ``train()`` detects worker mode via the
+``GYM_DR_IN_CONTAINER`` env var and runs the rotation.
 
 Environment-variable protocol between host and container
 --------------------------------------------------------
 The host orchestrator sets these on the container's env; the in-container
 ``_train_one_chunk`` reads them:
 
-- ``GYM_DR_IN_CONTAINER=1`` — tells the script "you are the chunk worker".
-- ``WORLD_NAME`` — consumed by the upstream simapp at container startup
-  (not by Python).
-- ``CHUNK_NAME`` — becomes ``experiment.name`` (so each chunk gets its own
-  ``artifacts/<chunk_name>/`` dir).
-- ``RESUME_FROM`` — container path to the previous chunk's
-  ``latest_model.zip``; overrides ``experiment.training.resume_from``.
-- ``CHUNK_STEPS`` — overrides ``experiment.training.total_timesteps``.
+- ``GYM_DR_IN_CONTAINER=1`` — tells the script "you are the worker".
+- ``GYM_DR_ROTATE=1`` — switch the trainer into runtime-rotation mode: walk
+  the strategy's training chunks (names × rotations) in one container, swapping
+  tracks with ``set_world`` between ``chunk_steps``-sized chunks. Set by the
+  single-container ``train`` host path, and by the HPO host for multi-world
+  studies so every trial rotates through the training worlds.
+- ``WORLD_NAME`` — the *first* world; consumed by the upstream simapp at
+  container startup (not by Python). Subsequent worlds are loaded via
+  ``set_world``.
+- ``CHUNK_NAME`` — becomes ``experiment.name`` (the ``artifacts/<name>/`` dir).
+- ``RESUME_FROM`` — container path to a starting ``latest_model.zip``;
+  overrides ``experiment.training.resume_from`` (applies to the first chunk).
+- ``CHUNK_STEPS`` — overrides ``experiment.training.total_timesteps`` (legacy
+  single-chunk path; the rotation path reads ``worlds.chunk_steps`` instead).
+- ``SEED`` — overrides ``experiment.seed``. Lets the host run the *same*
+  experiment script across several seeds (one container per seed) without the
+  script hard-coding a seed — see ``experiments/multiseed_ordered_split.py``.
 - ``MLFLOW_PARENT_RUN_ID`` — children open nested runs under this parent.
 
 For HPO the orchestrator additionally sets ``GYM_DR_WORKER=1``,
@@ -39,10 +51,11 @@ from gym_dr.config import ExperimentConfig
 def train(experiment: ExperimentConfig) -> Any:
     """Run a training. Mode-dispatched.
 
-    - On the *host* (no ``GYM_DR_IN_CONTAINER`` env): orchestrate a
-      multi-world rotation by spawning one Docker container per
-      ``(rotation, world)``. Returns the path of the final chunk's
-      ``latest_model.zip`` (host path).
+    - On the *host* (no ``GYM_DR_IN_CONTAINER`` env): launch a *single*
+      Docker container that trains the whole multi-world rotation in-process,
+      swapping tracks at runtime via ``DeepRacerEnv.set_world`` (no per-chunk
+      container restart). Returns the host path of the run's
+      ``latest_model.zip``.
     - *Inside a container* (``GYM_DR_IN_CONTAINER=1``): apply per-chunk
       env-var overrides, then run ``gym_dr.trainer.run_training``. Returns
       the final eval reward (float).
@@ -67,8 +80,14 @@ def study(
 
     On the host: pre-generate ``model_metadata.json``, open a parent MLflow
     run, spawn ``n_parallel`` worker containers that each pull trials from
-    one shared SQLite-backed Optuna study. World is fixed per study (uses
-    ``base.worlds.names[0]``; multi-world HPO is out of scope).
+    one shared SQLite-backed Optuna study. The world schedule comes from
+    ``base.effective_strategy()``: a single-world study trains every trial on
+    ``first_world()``, while a multi-world strategy (multi-world
+    ``SequentialRotation`` or ``OrderedSplit``) makes each trial rotate through
+    the training worlds — the worker hot-swaps the Gazebo track between chunks
+    via ``DeepRacerEnv.set_world`` (one container, no per-world restart).
+    Held-out eval worlds (``OrderedSplit.eval_worlds``) are measured each
+    evaluation regardless, giving a track-generalisation HPO objective.
 
     Inside a worker container (``GYM_DR_WORKER=1``): loop
     ``study.optimize(objective, n_trials=N_TRIALS_PER_WORKER)``.
@@ -113,6 +132,8 @@ def _train_one_chunk(experiment: ExperimentConfig) -> float:
         overrides["training.resume_from"] = resume
     if (chunk_steps := os.getenv("CHUNK_STEPS")):
         overrides["training.total_timesteps"] = int(chunk_steps)
+    if (seed := os.getenv("SEED")):
+        overrides["seed"] = int(seed)
     if overrides:
         experiment = experiment.with_overrides(**overrides)
 
@@ -138,59 +159,69 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     project_dir = Path(os.getenv("PROJECT_DIR", Path.cwd())).resolve()
     write_model_metadata(project_dir / "model_metadata.json", experiment.action_space)
 
-    image = os.getenv("IMAGE_TAG", "my-deepracer-project:cpu")
+    image = os.getenv("IMAGE_TAG") or _default_image(experiment.use_gpu)
     container_experiment_path = _to_container_path(experiment_path, project_dir)
 
-    worlds = experiment.worlds
-    chunk_steps = worlds.chunk_steps
-    resume_from: str | None = experiment.training.resume_from
-    last_latest_path: str | None = None
-    chunk_idx = 0
+    # The world schedule comes from the strategy (custom one, or a
+    # SequentialRotation derived from experiment.worlds). It decides the
+    # training order, the initial WORLD_NAME, and any held-out eval worlds.
+    strategy = experiment.effective_strategy()
+    chunks = strategy.training_chunks()
+    n_chunks = len(chunks)
+    first_world = strategy.first_world()
+    eval_worlds = strategy.evaluation_worlds()
 
-    for rot in range(worlds.rotations):
-        for world in worlds.names:
-            chunk_name = f"{experiment.name}_rot{rot}_{world}"
-            container_name = f"gym-dr-{experiment.name}-{chunk_idx}"
-            env = {
-                "GYM_DR_IN_CONTAINER": "1",
-                "WORLD_NAME": world,
-                "CHUNK_NAME": chunk_name,
-                "CHUNK_STEPS": str(chunk_steps),
-                "MLFLOW_RUN_GROUP": experiment.name,
-                "EXPERIMENT_PATH": container_experiment_path,
-            }
-            if resume_from:
-                env["RESUME_FROM"] = resume_from
-            if experiment.training.rtf_override is not None:
-                env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
-            ports: list[tuple[int, int]] | None = None
-            if experiment.enable_gui:
-                env["ENABLE_GUI"] = "True"
-                ports = [(5900, 5900)]
+    # Single-container runtime rotation. One container loads first_world at
+    # startup (the simapp reads WORLD_NAME once), then the in-process trainer
+    # walks the remaining chunks by calling DeepRacerEnv.set_world() between
+    # them — swapping the Gazebo track without restarting gzserver, and keeping
+    # the policy weights + PPO optimizer state in memory the whole time. The
+    # container rebuilds the same strategy from the experiment script;
+    # GYM_DR_ROTATE just switches the trainer into the rotation code path.
+    container_name = f"gym-dr-{experiment.name}"
+    env = {
+        "GYM_DR_IN_CONTAINER": "1",
+        "GYM_DR_ROTATE": "1",
+        "WORLD_NAME": first_world,
+        "CHUNK_NAME": experiment.name,
+        "MLFLOW_RUN_GROUP": experiment.name,
+        "EXPERIMENT_PATH": container_experiment_path,
+    }
+    if experiment.training.resume_from:
+        env["RESUME_FROM"] = experiment.training.resume_from
+    if experiment.training.rtf_override is not None:
+        env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
+    if experiment.seed is not None:
+        # Propagate the seed so a multi-seed host loop yields distinct,
+        # reproducible per-seed runs (the container re-imports the script, so
+        # the seed can't ride along on the experiment object — only via env).
+        env["SEED"] = str(experiment.seed)
+    ports: list[tuple[int, int]] | None = None
+    if experiment.enable_gui:
+        env["ENABLE_GUI"] = "True"
+        ports = [(5900, 5900)]
 
-            print(
-                f"[train] chunk {chunk_idx + 1}/{worlds.rotations * len(worlds.names)}: "
-                f"world={world!r} resume_from={resume_from!r}"
-                + ("  (GUI on vnc://localhost:5900)" if experiment.enable_gui else ""),
-                flush=True,
-            )
-            rc = spawn_training_chunk(
-                image_tag=image,
-                container_name=container_name,
-                base_env=env,
-                published_ports=ports,
-                use_gpu=experiment.use_gpu,
-            )
-            if rc != 0:
-                print(f"[train] chunk {container_name} exited rc={rc}; aborting", flush=True)
-                return last_latest_path
+    train_order = [c.world for c in chunks]
+    print(
+        f"[train] {strategy.name}: {n_chunks} chunk(s); "
+        f"train_order={train_order}, "
+        f"eval_worlds={eval_worlds or '(current training world)'}, "
+        f"first_world={first_world!r}"
+        + ("  (GUI on vnc://localhost:5900)" if experiment.enable_gui else ""),
+        flush=True,
+    )
+    rc = spawn_training_chunk(
+        image_tag=image,
+        container_name=container_name,
+        base_env=env,
+        published_ports=ports,
+        use_gpu=experiment.use_gpu,
+    )
+    if rc != 0:
+        print(f"[train] container {container_name} exited rc={rc}; aborting", flush=True)
+        return None
 
-            # Next chunk resumes from this chunk's latest_model.zip.
-            last_latest_path = f"/workspace/artifacts/{chunk_name}/latest_model.zip"
-            resume_from = last_latest_path
-            chunk_idx += 1
-
-    return last_latest_path
+    return f"/workspace/artifacts/{experiment.name}/latest_model.zip"
 
 
 # ----------------------------------- HPO ----------------------------------- #
@@ -226,17 +257,35 @@ def _spawn_workers(
     write_model_metadata(project_dir / "model_metadata.json", base.action_space)
 
     storage_url = storage or os.getenv("STUDY_STORAGE", "sqlite:////workspace/optuna.db")
-    image = image_tag or os.getenv("IMAGE_TAG", "my-deepracer-project:cpu")
+    image = image_tag or os.getenv("IMAGE_TAG") or _default_image(base.use_gpu)
 
-    world = base.worlds.names[0]
+    strategy = base.effective_strategy()
+    chunks = strategy.training_chunks()
     env = {
         "GYM_DR_WORKER": "1",
         "STUDY_STORAGE": storage_url,
         "MLFLOW_RUN_GROUP": f"study:{study_name}",
-        "WORLD_NAME": world,
+        "WORLD_NAME": strategy.first_world(),
         "EXPERIMENT_PATH": _to_container_path(experiment_path, project_dir),
         **extra_env,
     }
+    # Multi-world HPO. When the strategy schedules more than one training chunk
+    # (a multi-world SequentialRotation, or an OrderedSplit with several
+    # train_worlds), put the worker into runtime track-rotation mode so EVERY
+    # trial trains across the whole world schedule, hot-swapping the Gazebo
+    # track between chunks via DeepRacerEnv.set_world (no container restart).
+    # Single-world studies leave this unset and keep the legacy
+    # one-world-per-trial path. Held-out eval worlds need no flag — run_training
+    # always reads strategy.evaluation_worlds(), so OrderedSplit's track
+    # generalisation metric works in HPO with or without training rotation.
+    if len(chunks) > 1:
+        env["GYM_DR_ROTATE"] = "1"
+        print(
+            f"[hpo] multi-world HPO enabled: each trial rotates "
+            f"{[c.world for c in chunks]}; "
+            f"eval_worlds={strategy.evaluation_worlds() or '(current training world)'}",
+            flush=True,
+        )
     vnc_base = None
     if base.enable_gui:
         env["ENABLE_GUI"] = "True"
@@ -271,6 +320,15 @@ def _resolve_experiment_path() -> Path:
         "Could not locate the experiment script. "
         "Set GYM_DR_EXPERIMENT_FILE to its absolute path."
     )
+
+
+def _default_image(use_gpu: bool) -> str:
+    """Pick the right project image tag based on the experiment's GPU flag.
+
+    Keeps ``--gpus all`` (added when ``use_gpu=True``) and the image arch in
+    sync — otherwise we'd pass GPU access to a CPU-only image, which fails
+    silently if the user only rebuilt one arch."""
+    return "my-deepracer-project:gpu" if use_gpu else "my-deepracer-project:cpu"
 
 
 def _to_container_path(host_path: Path, project_dir: Path) -> str:

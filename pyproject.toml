@@ -17,6 +17,9 @@ dependencies = [
   "mlflow>=2.10",
   "optuna>=3.5",
   "gymnasium",
+  # Tier-1 trace sink (gym_dr/trace.py) writes Parquet step traces.
+  "pandas",
+  "pyarrow",
   # On Python 3.8 (the simapp container), cap each dep at the last major
   # that still ships 3.8 wheels. On 3.9+ these constraints are inert and
   # uv picks the latest as before.
@@ -29,6 +32,15 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Host-side analysis of the Tier-1 trace. deepracer-utils (from GitHub) brings
+# the gym-trace loader, track-path plots, and rliable analysis; its [gym] extra
+# adds pyarrow and [rliable] adds rliable. boto3/shapely come transitively.
+analysis = [
+    "deepracer-utils[gym,rliable]",
+    "ipykernel>=6.29.5",
+    "jupyterlab>=4.3.8",
+    "nbformat>=5.10.4",
+]
 dev = [
   "pytest>=8",
   "onnx>=1.15",
@@ -37,6 +49,12 @@ dev = [
   # Python 3.8 — keep the simapp-3.8 host on the 0.1.x line.
   "onnxscript<0.2; python_version<'3.9'",
 ]
+
+[tool.uv.sources]
+# Install deepracer-utils from the project owner's GitHub. Pin a branch so
+# `uv lock` records the resolved commit; switch `branch` to `rev = "<sha>"` to
+# pin an exact commit.
+deepracer-utils = { git = "https://github.com/Luna-v0/deepracer-utils.git", branch = "master" }
 
 [tool.setuptools]
 packages = ["gym_dr"]

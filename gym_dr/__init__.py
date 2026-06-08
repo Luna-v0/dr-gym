@@ -20,6 +20,7 @@ from gym_dr.action_space import (
 from gym_dr.app import inspect, study, train
 from gym_dr.config import (
     ExperimentConfig,
+    TraceConfig,
     TrackingConfig,
     TrainingConfig,
     WorldsConfig,
@@ -27,11 +28,14 @@ from gym_dr.config import (
     load_search_space,
 )
 from gym_dr.envs import time_trial
+from gym_dr.object_avoidance import ObjectAvoidanceConfig
+from gym_dr.seeding import ReplicateSeeds, SeedManager
 from gym_dr.rewards import (
     REWARD_VARIANTS,
     anti_zigzag,
     center_line,
     centerline_quadratic,
+    object_avoidance_aware,
     progress_and_speed,
     progress_per_step,
     progress_safe,
@@ -39,6 +43,12 @@ from gym_dr.rewards import (
 )
 from gym_dr.tracks import ALL_TRACKS, TRACKS, display_name, existing_tracks
 from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
+from gym_dr.worlds import (
+    OrderedSplit,
+    SequentialRotation,
+    WorldChunk,
+    WorldStrategy,
+)
 
 __all__ = [
     "ALL_TRACKS",
@@ -46,10 +56,18 @@ __all__ = [
     "DiscreteAction",
     "DiscreteActionSpaceConfig",
     "ExperimentConfig",
+    "ObjectAvoidanceConfig",
+    "ReplicateSeeds",
     "Sb3Trainer",
+    "SeedManager",
     "TRACKS",
+    "TraceConfig",
     "TrackingConfig",
     "Trainer",
+    "OrderedSplit",
+    "SequentialRotation",
+    "WorldChunk",
+    "WorldStrategy",
     "TrainingConfig",
     "TrainingContext",
     "TrainResult",
@@ -63,6 +81,7 @@ __all__ = [
     "inspect",
     "load_config",
     "load_search_space",
+    "object_avoidance_aware",
     "progress_and_speed",
     "progress_per_step",
     "progress_safe",

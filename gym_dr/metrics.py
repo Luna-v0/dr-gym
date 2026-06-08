@@ -22,12 +22,14 @@ existing MLflow mirror callback re-publishes them as MLflow metrics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple
 
 import gymnasium as gym
 
 if TYPE_CHECKING:
     from gym_dr.config import ExperimentConfig
+    from gym_dr.trace import TraceSink
 
 
 @dataclass
@@ -50,6 +52,15 @@ class _EpisodeMetrics:
     speed_sum: float = 0.0
     steering_abs_sum: float = 0.0
     use_eval_reward: bool = False
+
+    # --- Tier-1 trace sink (optional; see gym_dr/trace.py) -----------------
+    # These are mode-level, NOT reset per episode. The trainer updates
+    # world_name/chunk_index around each runtime track swap so every row knows
+    # which hot-swapped world it belongs to (docs/trace-contract.md §2).
+    sink: Optional["TraceSink"] = None
+    world_name: Optional[str] = None
+    chunk_index: int = 0
+    run_id: Optional[str] = None
 
     def reset(self) -> None:
         self.steps = 0
@@ -76,6 +87,31 @@ class _EpisodeMetrics:
             self.max_progress = progress
         self.speed_sum += float(params.get("speed", 0.0))
         self.steering_abs_sum += abs(float(params.get("steering_angle", 0.0)))
+
+        if self.sink is not None and self.sink.enabled:
+            from gym_dr.trace import build_step_row
+
+            self.sink.add(
+                build_step_row(
+                    params,
+                    step=self.steps,
+                    reward=float(reward),
+                    eval_reward=float(eval_reward),
+                    phase="eval" if self.use_eval_reward else "train",
+                )
+            )
+
+    def flush_episode(self) -> None:
+        """Flush the buffered episode to a trace shard, if a sink is wired."""
+        if self.sink is None or not self.sink.enabled:
+            return
+        if self.run_id is None:
+            self.run_id = _active_run_id()
+        self.sink.flush_episode(
+            world_name=self.world_name,
+            chunk_index=self.chunk_index,
+            run_id=self.run_id,
+        )
 
     def summary(self) -> dict[str, float]:
         n = max(self.steps, 1)
@@ -138,6 +174,11 @@ class _MetricsEnvWrapper(gym.Wrapper):
         self._state = state
 
     def reset(self, **kwargs: Any):
+        # Drop any unflushed partial episode (e.g. a manual mid-episode reset).
+        # In normal training the terminal step has already flushed, so this is
+        # a no-op on an empty buffer.
+        if self._state.sink is not None:
+            self._state.sink.abandon_episode()
         self._state.reset()
         return self.env.reset(**kwargs)
 
@@ -145,11 +186,29 @@ class _MetricsEnvWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         if terminated or truncated:
             info = {**(info or {}), "dr_episode": self._state.summary()}
+            # Flush BEFORE the vec-env auto-resets, so the buffer is the
+            # just-finished episode.
+            self._state.flush_episode()
         return obs, reward, terminated, truncated, info
+
+
+def _active_run_id() -> Optional[str]:
+    """The active MLflow run id, or None if MLflow is absent/inactive.
+
+    Resolved lazily at first flush — the run isn't open when the env (and this
+    state) are built; ``start_run`` opens it later in the orchestrator.
+    """
+    try:
+        import mlflow
+    except ImportError:
+        return None
+    run = mlflow.active_run()
+    return run.info.run_id if run is not None else None
 
 
 def install_metrics(
     experiment: "ExperimentConfig",
+    run_dir: "Optional[Path]" = None,
 ) -> Tuple["ExperimentConfig", Callable[[Any], Any], _EpisodeMetrics]:
     """Wire metrics around an experiment's reward + env.
 
@@ -162,8 +221,20 @@ def install_metrics(
     The wrapped reward records every call's params into the state object;
     the env wrapper finalizes that state on each terminal step and stashes
     the summary in ``info["dr_episode"]`` for the SB3 callback to pick up.
+
+    When ``run_dir`` is given and ``experiment.trace.enabled`` is set, a
+    :class:`gym_dr.trace.TraceSink` is attached so every step is also written to
+    per-episode Parquet shards under ``run_dir/trace/steps/`` (the Tier-1
+    simtrace-equivalent; see ``docs/trace-contract.md``).
     """
     state = _EpisodeMetrics()
+
+    trace_cfg = getattr(experiment, "trace", None)
+    if run_dir is not None and trace_cfg is not None and getattr(trace_cfg, "enabled", False):
+        from gym_dr.trace import TraceSink
+
+        state.sink = TraceSink(run_dir, compression=trace_cfg.compression)
+
     eval_reward_fn = getattr(experiment, "eval_reward", None)
     wrapped_reward = _wrap_reward(experiment.reward, state, eval_reward_fn=eval_reward_fn)
     wrapped_experiment = experiment.with_overrides(reward=wrapped_reward)

@@ -54,6 +54,14 @@ class StubDeepRacerEnv(gym.Env):
         self._reward_fn = reward_fn
         self._sensor_name = sensor_name
         self._step = 0
+        self.world = "stub_world"
+        self.set_world_calls: list[str] = []
+
+    def set_world(self, world_name):
+        """Mirror DeepRacerEnv.set_world's between-episodes contract for the
+        rotation test: record the swap and update the active world."""
+        self.set_world_calls.append(world_name)
+        self.world = world_name
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -102,6 +110,12 @@ def container_mode(tmp_path, monkeypatch):
     monkeypatch.delenv("CHUNK_NAME", raising=False)
     monkeypatch.delenv("RESUME_FROM", raising=False)
     monkeypatch.delenv("CHUNK_STEPS", raising=False)
+    # Sb3Trainer._boot_world_consumed is process-global (it models "has a
+    # rotation chunk run yet in THIS worker container"). Tests share one
+    # process, so reset it per test to model a fresh container — otherwise the
+    # rotation tests would see a stale flag from a prior test and re-pin the
+    # boot world unexpectedly. The dedicated reuse test sets it on purpose.
+    Sb3Trainer._boot_world_consumed = False
     return tmp_path
 
 
@@ -180,6 +194,170 @@ def test_per_chunk_env_overrides_apply(container_mode):
     assert not (tmp_path / "artifacts" / "base_name").exists()
 
 
+def test_runtime_world_rotation_swaps_in_process(container_mode, monkeypatch):
+    """With GYM_DR_ROTATE=1 and a multi-world WorldsConfig, the trainer runs
+    one in-process rotation and calls env.set_world() once per world after the
+    first — no second container, no checkpoint reload between worlds."""
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    # Capture set_world calls across the (wrapped, vec-env'd) stub instance.
+    calls: list[str] = []
+    orig_set_world = StubDeepRacerEnv.set_world
+
+    def _recording_set_world(self, world_name):
+        calls.append(world_name)
+        return orig_set_world(self, world_name)
+
+    monkeypatch.setattr(StubDeepRacerEnv, "set_world", _recording_set_world)
+
+    exp = _experiment("rotation_run", tmp_path, total_timesteps=64).with_overrides(
+        worlds=WorldsConfig(names=["world_a", "world_b"], chunk_steps=64, rotations=2),
+    )
+    result = train(exp)
+    assert isinstance(result, float)
+
+    # Plan = [a, b, a, b]; first chunk uses the already-loaded world, so three
+    # set_world swaps happen, ending on world_b.
+    assert calls == ["world_b", "world_a", "world_b"], calls
+
+    run_dir = tmp_path / "artifacts" / "rotation_run"
+    assert (run_dir / "latest_model.zip").exists()
+
+
+def test_reused_worker_repins_world_before_first_chunk(container_mode, monkeypatch):
+    """A worker runs several HPO trials back-to-back in one container, and the
+    Gazebo world persists across them. The first trial trusts the boot world,
+    but every later trial must re-pin the track to world_plan[0] before chunk 0
+    (the previous trial's rotation left a different world loaded). Verifies the
+    second trial's swaps start with the first planned world, not chunk 1's."""
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    calls: list[str] = []
+    orig_set_world = StubDeepRacerEnv.set_world
+
+    def _recording_set_world(self, world_name):
+        calls.append(world_name)
+        return orig_set_world(self, world_name)
+
+    monkeypatch.setattr(StubDeepRacerEnv, "set_world", _recording_set_world)
+
+    plan = WorldsConfig(names=["world_a", "world_b"], chunk_steps=64, rotations=1)
+
+    # First trial in the (simulated) container: boot world is world_a, so the
+    # first chunk doesn't swap; only the rotation to world_b does.
+    exp1 = _experiment("reuse_trial_0", tmp_path, total_timesteps=64).with_overrides(worlds=plan)
+    train(exp1)
+    assert calls == ["world_b"], calls
+
+    # Second trial in the SAME process (flag NOT reset): the container is left
+    # on world_b, so the trial re-pins to world_a up front, then rotates to b.
+    calls.clear()
+    exp2 = _experiment("reuse_trial_1", tmp_path, total_timesteps=64).with_overrides(worlds=plan)
+    train(exp2)
+    assert calls == ["world_a", "world_b"], calls
+
+    assert (tmp_path / "artifacts" / "reuse_trial_1" / "latest_model.zip").exists()
+
+
+def test_ordered_split_evaluates_on_held_out_worlds(container_mode, monkeypatch):
+    """OrderedSplit trains in train_worlds order and, at eval time, swaps the
+    env to each held-out eval world (then restores the training world)."""
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    calls: list[str] = []
+    orig_set_world = StubDeepRacerEnv.set_world
+
+    def _recording_set_world(self, world_name):
+        calls.append(world_name)
+        return orig_set_world(self, world_name)
+
+    monkeypatch.setattr(StubDeepRacerEnv, "set_world", _recording_set_world)
+
+    from gym_dr import OrderedSplit
+
+    exp = _experiment("ordered_split", tmp_path, total_timesteps=64, eval_freq=64).with_overrides(
+        world_strategy=OrderedSplit(
+            train_worlds=["train_a", "train_b"],
+            eval_worlds=["eval_x", "eval_y"],
+            chunk_steps=64,
+            rotations=1,
+        ),
+    )
+    result = train(exp)
+    assert isinstance(result, float)
+
+    # Training rotates to the second train world (first uses the preloaded one).
+    assert "train_b" in calls, calls
+    # Evaluation visited every held-out world.
+    assert "eval_x" in calls and "eval_y" in calls, calls
+    # The held-out worlds are never trained on (they only appear via eval swaps,
+    # never as a chunk in the training plan order).
+    strat = exp.world_strategy
+    assert [c.world for c in strat.training_chunks()] == ["train_a", "train_b"]
+    assert strat.evaluation_worlds() == ["eval_x", "eval_y"]
+
+    run_dir = tmp_path / "artifacts" / "ordered_split"
+    assert (run_dir / "latest_model.zip").exists()
+
+
+def test_multiworld_study_enables_rotation(tmp_path, monkeypatch):
+    """HPO host wiring: a multi-world strategy makes ``study`` set GYM_DR_ROTATE
+    on the worker env (so each trial rotates training worlds), while a
+    single-world strategy leaves it unset (legacy one-world-per-trial)."""
+    import gym_dr.docker_runner as docker_runner
+    from gym_dr import OrderedSplit, study
+
+    monkeypatch.delenv("GYM_DR_WORKER", raising=False)
+    monkeypatch.delenv("GYM_DR_IN_CONTAINER", raising=False)
+    monkeypatch.setenv("PROJECT_DIR", str(tmp_path))
+    exp_file = tmp_path / "exp.py"
+    exp_file.write_text("experiment = None\n")
+    monkeypatch.setenv("GYM_DR_EXPERIMENT_FILE", str(exp_file))
+
+    captured: dict[str, Any] = {}
+
+    def fake_spawn_workers(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(docker_runner, "spawn_workers", fake_spawn_workers)
+
+    def _study_with(strategy):
+        exp = _experiment("study_x", tmp_path).with_overrides(world_strategy=strategy)
+        study(exp, lambda t: {}, study_name="s", n_trials=1, n_parallel=1)
+        return captured["base_env"]
+
+    multi_env = _study_with(
+        OrderedSplit(train_worlds=["world_a", "world_b", "world_c"],
+                     eval_worlds=["eval_x"], chunk_steps=10)
+    )
+    assert multi_env.get("GYM_DR_ROTATE") == "1", multi_env
+    assert multi_env["WORLD_NAME"] == "world_a"   # first training world
+
+    single_env = _study_with(
+        OrderedSplit(train_worlds=["world_a"], eval_worlds=["eval_x"], chunk_steps=10)
+    )
+    assert "GYM_DR_ROTATE" not in single_env, single_env
+    assert single_env["WORLD_NAME"] == "world_a"
+
+
+def test_seed_env_override_applied(container_mode, monkeypatch):
+    """The container reads SEED from the env and applies it (the multi-seed
+    host loop relies on this to give each seed a distinct, reproducible run)."""
+    import json
+
+    tmp_path = container_mode
+    monkeypatch.setenv("SEED", "1234")
+    exp = _experiment("seed_run", tmp_path, total_timesteps=64)
+    train(exp)
+    rc = json.loads((tmp_path / "artifacts" / "seed_run" / "run_config.json").read_text())
+    assert rc["seed"] == 1234
+
+
 def test_custom_reward_archived(container_mode):
     tmp_path = container_mode
 
@@ -212,16 +390,18 @@ def test_worlds_config_coerces_bare_string():
     assert WorldsConfig(names=["A", "B"]).names == ["A", "B"]
 
 
-def test_app_py_search_space_applies_to_base():
-    """app.py defines base + search_space; ensure trial overrides land cleanly:
-    the AWS-faithful policy_kwargs (separate towers, raw 0-255), the swept CNN
-    conv stack, and independently-sized pi/vf FC heads."""
+def test_object_avoidance_hpo_search_space_applies_to_base():
+    """The OA HPO study (experiments/object_avoidance_hpo.py) defines base +
+    search_space; ensure trial overrides land cleanly: the AWS-faithful
+    policy_kwargs (separate towers, raw 0-255), the swept CNN conv stack, and
+    independently-sized pi/vf FC heads. (This study used to live in app.py.)"""
     import importlib.util
     import optuna
     from pathlib import Path
 
     spec = importlib.util.spec_from_file_location(
-        "app_under_test", Path(__file__).parent.parent / "app.py"
+        "app_under_test",
+        Path(__file__).parent.parent / "experiments" / "object_avoidance_hpo.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

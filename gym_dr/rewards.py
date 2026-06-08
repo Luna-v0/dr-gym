@@ -215,6 +215,62 @@ def waypoint_anticipation(params: dict) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# Object Avoidance variants. Only meaningful when
+# ``ExperimentConfig.object_avoidance`` is set (so the env populates
+# ``is_crashed``, ``closest_objects`` and ``objects_location`` in params).
+# Safe to call without OA enabled — the relevant keys default to
+# "no obstacle" / "not crashed" via .get(...).
+# --------------------------------------------------------------------------- #
+
+CRASH_PENALTY = -10.0
+"""Per-step penalty when the car hits a spawned obstacle. Sized larger
+than ``OFFTRACK_STEP_PENALTY`` because a collision is a harder failure
+mode — in the AWS Object Avoidance race it ends the lap, and in our
+fork (with ``terminate_on_collision=True``, the default) it terminates
+the episode. Reduce if you set ``terminate_on_collision=False`` and
+want the per-step cost to persist across the rest of the trajectory
+without overwhelming the on-track learning signal."""
+
+
+def object_avoidance_aware(params: dict) -> float:
+    """Progress × speed with crash penalty + lane-commit bonus.
+
+    Mirrors the example reward in the deepracer-env fork
+    (``examples/train_object_avoidance.py``): a hard penalty when the car
+    crashes into an obstacle, and a small bonus for committing to one
+    side of the track when an obstacle is *ahead* — encouraging the
+    policy to pick a lane before reaching the obstacle rather than
+    swerving at the last moment.
+
+    Reward params consumed (in addition to the standard set):
+      - ``is_crashed``       (bool) — collision flag from the OA-aware controller.
+      - ``closest_objects``  (``[prev_idx, next_idx]``; ``-1`` = none ahead).
+
+    With OA disabled both default-getter to safe values, so this reduces
+    to a centerline-agnostic progress × speed reward.
+    """
+    if params.get("is_crashed", False):
+        return CRASH_PENALTY
+    if not params.get("all_wheels_on_track", True):
+        return OFFTRACK_STEP_PENALTY
+
+    closest_objects = params.get("closest_objects", [-1, -1])
+    next_obj_idx = int(closest_objects[1]) if len(closest_objects) >= 2 else -1
+    has_obstacle_ahead = next_obj_idx >= 0
+
+    if has_obstacle_ahead:
+        # Reward committing to one side of the track before reaching the
+        # obstacle. >10 cm off the centerline counts as "committed".
+        bonus = 1.5 if float(params.get("distance_from_center", 0.0)) > 0.1 else 0.7
+    else:
+        bonus = 1.0
+
+    progress = float(params.get("progress", 0.0))
+    speed = float(params.get("speed", 0.0))
+    return float(max(progress * speed * bonus / 4.0, 1e-3))
+
+
+# --------------------------------------------------------------------------- #
 # Eval-only reward. NOT in REWARD_VARIANTS — never sampled as a training
 # reward because the off-track penalty is large and negative, which would
 # destabilize PPO gradients. Used by ExperimentConfig.eval_reward to score
@@ -274,6 +330,7 @@ REWARD_VARIANTS: dict = {
     "centerline_quadratic": centerline_quadratic,
     "anti_zigzag": anti_zigzag,
     "waypoint_anticipation": waypoint_anticipation,
+    "object_avoidance_aware": object_avoidance_aware,
 }
 """Name -> callable map. Used by HPO to sample a training reward via Optuna
 ``suggest_categorical`` (which only accepts hashable scalars, not function
