@@ -145,7 +145,7 @@ docker build \
 
 step "Sanity-checking ${PROJECT_IMAGE}"
 SANITY_OUT="$(docker run --rm --entrypoint python3 "${PROJECT_IMAGE}" \
-  -c "import stable_baselines3 as sb3, mlflow, optuna; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__)" 2>&1)" || {
+  -c "import stable_baselines3 as sb3, mlflow, optuna, pandas, pyarrow; print('OK sb3', sb3.__version__, 'mlflow', mlflow.__version__, 'optuna', optuna.__version__, 'pandas', pandas.__version__, 'pyarrow', pyarrow.__version__)" 2>&1)" || {
   echo "${SANITY_OUT}" >&2
   fail "Project image built but failed the import sanity check. Inspect the output above."
 }

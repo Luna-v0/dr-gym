@@ -17,8 +17,10 @@ The host orchestrator sets these on the container's env; the in-container
 
 - ``GYM_DR_IN_CONTAINER=1`` — tells the script "you are the worker".
 - ``GYM_DR_ROTATE=1`` — switch the trainer into runtime-rotation mode: walk
-  ``experiment.worlds`` (names × rotations) in one container, swapping tracks
-  with ``set_world`` between ``chunk_steps``-sized chunks.
+  the strategy's training chunks (names × rotations) in one container, swapping
+  tracks with ``set_world`` between ``chunk_steps``-sized chunks. Set by the
+  single-container ``train`` host path, and by the HPO host for multi-world
+  studies so every trial rotates through the training worlds.
 - ``WORLD_NAME`` — the *first* world; consumed by the upstream simapp at
   container startup (not by Python). Subsequent worlds are loaded via
   ``set_world``.
@@ -27,6 +29,9 @@ The host orchestrator sets these on the container's env; the in-container
   overrides ``experiment.training.resume_from`` (applies to the first chunk).
 - ``CHUNK_STEPS`` — overrides ``experiment.training.total_timesteps`` (legacy
   single-chunk path; the rotation path reads ``worlds.chunk_steps`` instead).
+- ``SEED`` — overrides ``experiment.seed``. Lets the host run the *same*
+  experiment script across several seeds (one container per seed) without the
+  script hard-coding a seed — see ``experiments/multiseed_ordered_split.py``.
 - ``MLFLOW_PARENT_RUN_ID`` — children open nested runs under this parent.
 
 For HPO the orchestrator additionally sets ``GYM_DR_WORKER=1``,
@@ -75,8 +80,14 @@ def study(
 
     On the host: pre-generate ``model_metadata.json``, open a parent MLflow
     run, spawn ``n_parallel`` worker containers that each pull trials from
-    one shared SQLite-backed Optuna study. World is fixed per study (uses
-    ``base.worlds.names[0]``; multi-world HPO is out of scope).
+    one shared SQLite-backed Optuna study. The world schedule comes from
+    ``base.effective_strategy()``: a single-world study trains every trial on
+    ``first_world()``, while a multi-world strategy (multi-world
+    ``SequentialRotation`` or ``OrderedSplit``) makes each trial rotate through
+    the training worlds — the worker hot-swaps the Gazebo track between chunks
+    via ``DeepRacerEnv.set_world`` (one container, no per-world restart).
+    Held-out eval worlds (``OrderedSplit.eval_worlds``) are measured each
+    evaluation regardless, giving a track-generalisation HPO objective.
 
     Inside a worker container (``GYM_DR_WORKER=1``): loop
     ``study.optimize(objective, n_trials=N_TRIALS_PER_WORKER)``.
@@ -121,6 +132,8 @@ def _train_one_chunk(experiment: ExperimentConfig) -> float:
         overrides["training.resume_from"] = resume
     if (chunk_steps := os.getenv("CHUNK_STEPS")):
         overrides["training.total_timesteps"] = int(chunk_steps)
+    if (seed := os.getenv("SEED")):
+        overrides["seed"] = int(seed)
     if overrides:
         experiment = experiment.with_overrides(**overrides)
 
@@ -149,22 +162,27 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     image = os.getenv("IMAGE_TAG") or _default_image(experiment.use_gpu)
     container_experiment_path = _to_container_path(experiment_path, project_dir)
 
-    worlds = experiment.worlds
-    n_chunks = worlds.rotations * len(worlds.names)
+    # The world schedule comes from the strategy (custom one, or a
+    # SequentialRotation derived from experiment.worlds). It decides the
+    # training order, the initial WORLD_NAME, and any held-out eval worlds.
+    strategy = experiment.effective_strategy()
+    chunks = strategy.training_chunks()
+    n_chunks = len(chunks)
+    first_world = strategy.first_world()
+    eval_worlds = strategy.evaluation_worlds()
 
-    # Single-container runtime rotation. One container loads worlds.names[0] at
+    # Single-container runtime rotation. One container loads first_world at
     # startup (the simapp reads WORLD_NAME once), then the in-process trainer
     # walks the remaining chunks by calling DeepRacerEnv.set_world() between
     # them — swapping the Gazebo track without restarting gzserver, and keeping
     # the policy weights + PPO optimizer state in memory the whole time. The
-    # container reads the rotation plan (names, chunk_steps, rotations) straight
-    # off experiment.worlds; GYM_DR_ROTATE just switches the trainer into the
-    # rotation code path.
+    # container rebuilds the same strategy from the experiment script;
+    # GYM_DR_ROTATE just switches the trainer into the rotation code path.
     container_name = f"gym-dr-{experiment.name}"
     env = {
         "GYM_DR_IN_CONTAINER": "1",
         "GYM_DR_ROTATE": "1",
-        "WORLD_NAME": worlds.names[0],
+        "WORLD_NAME": first_world,
         "CHUNK_NAME": experiment.name,
         "MLFLOW_RUN_GROUP": experiment.name,
         "EXPERIMENT_PATH": container_experiment_path,
@@ -173,15 +191,22 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
         env["RESUME_FROM"] = experiment.training.resume_from
     if experiment.training.rtf_override is not None:
         env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
+    if experiment.seed is not None:
+        # Propagate the seed so a multi-seed host loop yields distinct,
+        # reproducible per-seed runs (the container re-imports the script, so
+        # the seed can't ride along on the experiment object — only via env).
+        env["SEED"] = str(experiment.seed)
     ports: list[tuple[int, int]] | None = None
     if experiment.enable_gui:
         env["ENABLE_GUI"] = "True"
         ports = [(5900, 5900)]
 
+    train_order = [c.world for c in chunks]
     print(
-        f"[train] single-container rotation: {n_chunks} chunk(s) over "
-        f"worlds={worlds.names} x{worlds.rotations}, "
-        f"chunk_steps={worlds.chunk_steps}, first_world={worlds.names[0]!r}"
+        f"[train] {strategy.name}: {n_chunks} chunk(s); "
+        f"train_order={train_order}, "
+        f"eval_worlds={eval_worlds or '(current training world)'}, "
+        f"first_world={first_world!r}"
         + ("  (GUI on vnc://localhost:5900)" if experiment.enable_gui else ""),
         flush=True,
     )
@@ -234,15 +259,33 @@ def _spawn_workers(
     storage_url = storage or os.getenv("STUDY_STORAGE", "sqlite:////workspace/optuna.db")
     image = image_tag or os.getenv("IMAGE_TAG") or _default_image(base.use_gpu)
 
-    world = base.worlds.names[0]
+    strategy = base.effective_strategy()
+    chunks = strategy.training_chunks()
     env = {
         "GYM_DR_WORKER": "1",
         "STUDY_STORAGE": storage_url,
         "MLFLOW_RUN_GROUP": f"study:{study_name}",
-        "WORLD_NAME": world,
+        "WORLD_NAME": strategy.first_world(),
         "EXPERIMENT_PATH": _to_container_path(experiment_path, project_dir),
         **extra_env,
     }
+    # Multi-world HPO. When the strategy schedules more than one training chunk
+    # (a multi-world SequentialRotation, or an OrderedSplit with several
+    # train_worlds), put the worker into runtime track-rotation mode so EVERY
+    # trial trains across the whole world schedule, hot-swapping the Gazebo
+    # track between chunks via DeepRacerEnv.set_world (no container restart).
+    # Single-world studies leave this unset and keep the legacy
+    # one-world-per-trial path. Held-out eval worlds need no flag — run_training
+    # always reads strategy.evaluation_worlds(), so OrderedSplit's track
+    # generalisation metric works in HPO with or without training rotation.
+    if len(chunks) > 1:
+        env["GYM_DR_ROTATE"] = "1"
+        print(
+            f"[hpo] multi-world HPO enabled: each trial rotates "
+            f"{[c.world for c in chunks]}; "
+            f"eval_worlds={strategy.evaluation_worlds() or '(current training world)'}",
+            flush=True,
+        )
     vnc_base = None
     if base.enable_gui:
         env["ENABLE_GUI"] = "True"

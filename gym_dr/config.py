@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from gym_dr.action_space import ActionSpaceConfig, ContinuousActionSpaceConfig
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
+from gym_dr.worlds import SequentialRotation, WorldStrategy
 
 if TYPE_CHECKING:
     from gym_dr.trainers.base import Trainer
@@ -178,6 +179,26 @@ class WorldsConfig:
             object.__setattr__(self, "names", [self.names])
 
 
+@dataclass(frozen=True)
+class TraceConfig:
+    """Per-step Tier-1 trace sink (see ``docs/trace-contract.md``).
+
+    When ``enabled``, the metrics wrapper writes one row per env step to
+    per-episode Parquet shards under ``artifacts/<chunk>/trace/steps/`` — the
+    simtrace-equivalent that the analysis layer reads via
+    ``gym_dr.trace.load_steps``. Off by default: a long HPO study would emit a
+    shard per episode across hundreds of trials, so turn it on for the analysis
+    runs you actually want to dissect.
+    """
+
+    enabled: bool = False
+    """Write the per-step trace. Default ``False`` (HPO-safe)."""
+
+    compression: str = "snappy"
+    """Parquet codec passed to ``DataFrame.to_parquet``. ``snappy`` (fast,
+    default), ``zstd`` (smaller), or ``None`` for uncompressed."""
+
+
 def _default_env_factory():
     from gym_dr.envs import time_trial
 
@@ -272,7 +293,17 @@ class ExperimentConfig:
 
     worlds: WorldsConfig = field(default_factory=WorldsConfig)
     """List of worlds to rotate through. Single-world runs use a list of one
-    (the default: ``["reinvent_base"]``)."""
+    (the default: ``["reinvent_base"]``). Ignored when ``world_strategy`` is
+    set — see :meth:`effective_strategy`."""
+
+    world_strategy: WorldStrategy | None = None
+    """Optional world-scheduling strategy (``gym_dr.worlds``). When set it
+    *supersedes* ``worlds``, deciding both the training world order and the
+    (possibly held-out) evaluation worlds. ``None`` (default) falls back to a
+    :class:`~gym_dr.worlds.SequentialRotation` built from ``worlds`` — so
+    existing configs behave exactly as before. Use
+    :class:`~gym_dr.worlds.OrderedSplit` to train on one ordered list and
+    evaluate on another."""
 
     object_avoidance: ObjectAvoidanceConfig | None = None
     """Optional static-obstacle Object Avoidance settings. ``None`` (the
@@ -290,6 +321,11 @@ class ExperimentConfig:
 
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     """MLflow + TensorBoard settings."""
+
+    trace: TraceConfig = field(default_factory=TraceConfig)
+    """Per-step Tier-1 trace sink. Off by default; enable to dump the
+    simtrace-equivalent Parquet shards for offline analysis (see
+    ``docs/trace-contract.md`` and ``gym_dr/trace.py``)."""
 
     enable_gui: bool = False
     """When ``True``, the simapp boots Gazebo with its GUI/VNC enabled. The
@@ -323,6 +359,23 @@ class ExperimentConfig:
     even at a fixed seed — expect some run-to-run variance from the
     simulator regardless."""
 
+    def effective_strategy(self) -> WorldStrategy:
+        """The world schedule actually used for this run.
+
+        Returns ``world_strategy`` when set, else a
+        :class:`~gym_dr.worlds.SequentialRotation` derived from ``worlds`` —
+        so the strategy pattern is the single source of truth for world order
+        and evaluation worlds, whether or not the user opted into a custom
+        strategy.
+        """
+        if self.world_strategy is not None:
+            return self.world_strategy
+        return SequentialRotation(
+            names=list(self.worlds.names),
+            chunk_steps=self.worlds.chunk_steps,
+            rotations=self.worlds.rotations,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON dump / MLflow logging.
 
@@ -341,6 +394,9 @@ class ExperimentConfig:
                 "action_space_type": self.action_space.action_space_type,
             },
             "worlds": dataclasses.asdict(self.worlds),
+            "world_strategy": (
+                _describe(self.world_strategy) if self.world_strategy is not None else None
+            ),
             "object_avoidance": (
                 dataclasses.asdict(self.object_avoidance)
                 if self.object_avoidance is not None
@@ -348,6 +404,7 @@ class ExperimentConfig:
             ),
             "training": dataclasses.asdict(self.training),
             "tracking": dataclasses.asdict(self.tracking),
+            "trace": dataclasses.asdict(self.trace),
             "enable_gui": self.enable_gui,
             "use_gpu": self.use_gpu,
             "seed": self.seed,

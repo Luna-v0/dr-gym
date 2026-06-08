@@ -144,25 +144,40 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     # finalizes per-episode metrics into info['dr_episode']. See gym_dr/metrics.py.
     from gym_dr.metrics import install_metrics
 
-    experiment, env_wrapper, metrics_state = install_metrics(experiment)
+    experiment, env_wrapper, metrics_state = install_metrics(experiment, run_dir=run_dir)
+    # The world schedule (strategy pattern). Falls back to a SequentialRotation
+    # built from experiment.worlds when no explicit strategy is set, so this is
+    # the single source of truth for world order + evaluation worlds.
+    strategy = experiment.effective_strategy()
+    # Seed the trace's world context from WORLD_NAME (the world Gazebo loaded at
+    # container start). Multi-world rotations update this per chunk in
+    # Sb3Trainer.fit around each set_world swap; single-world runs keep it.
+    metrics_state.world_name = os.getenv("WORLD_NAME") or strategy.first_world()
 
     _write_json(run_dir / "run_config.json", experiment.to_dict())
     _update_status(run_dir, "initialized")
 
     env = env_wrapper(experiment.env_factory(experiment))
 
-    # Runtime multi-world rotation. When the host orchestrator runs a single
-    # container that rotates worlds in-process (GYM_DR_ROTATE=1), expand the
-    # WorldsConfig into a per-chunk plan the trainer walks via the env's
-    # set_world() track swap. Otherwise (HPO workers, direct single-world
-    # runs, the test stub) world_plan stays None and the trainer takes the
-    # legacy single-``model.learn`` path.
+    # Runtime multi-world rotation. When the orchestrator asks for in-process
+    # track rotation (GYM_DR_ROTATE=1 — set by the single-container train host,
+    # and by the HPO host for multi-world studies), expand the strategy into a
+    # per-chunk plan the trainer walks via the env's set_world() track swap.
+    # Otherwise (single-world HPO, direct single-world runs, the test stub)
+    # world_plan stays None and the trainer takes the legacy single-
+    # ``model.learn`` path.
     world_plan: list[str] | None = None
     chunk_steps: int | None = None
     if os.getenv("GYM_DR_ROTATE"):
-        worlds = experiment.worlds
-        world_plan = [w for _ in range(worlds.rotations) for w in worlds.names]
-        chunk_steps = worlds.chunk_steps
+        chunks = strategy.training_chunks()
+        world_plan = [c.world for c in chunks]
+        # Uniform chunk length today (the shipped strategies emit equal steps);
+        # the trainer trains chunk_steps per world.
+        chunk_steps = chunks[0].steps if chunks else None
+
+    # Evaluation worlds are independent of the training rotation: a held-out
+    # eval list (OrderedSplit) is measured even for single-world training.
+    eval_worlds = strategy.evaluation_worlds()
 
     ctx = TrainingContext(
         run_dir=run_dir,
@@ -173,6 +188,7 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
         metrics_state=metrics_state,
         world_plan=world_plan,
         chunk_steps=chunk_steps,
+        eval_worlds=eval_worlds or None,
     )
 
     started_at = time.monotonic()

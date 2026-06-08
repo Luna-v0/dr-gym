@@ -20,6 +20,7 @@ from gym_dr.action_space import (
 from gym_dr.app import inspect, study, train
 from gym_dr.config import (
     ExperimentConfig,
+    TraceConfig,
     TrackingConfig,
     TrainingConfig,
     WorldsConfig,
@@ -42,6 +43,12 @@ from gym_dr.rewards import (
 )
 from gym_dr.tracks import ALL_TRACKS, TRACKS, display_name, existing_tracks
 from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
+from gym_dr.worlds import (
+    OrderedSplit,
+    SequentialRotation,
+    WorldChunk,
+    WorldStrategy,
+)
 
 __all__ = [
     "ALL_TRACKS",
@@ -54,8 +61,13 @@ __all__ = [
     "Sb3Trainer",
     "SeedManager",
     "TRACKS",
+    "TraceConfig",
     "TrackingConfig",
     "Trainer",
+    "OrderedSplit",
+    "SequentialRotation",
+    "WorldChunk",
+    "WorldStrategy",
     "TrainingConfig",
     "TrainingContext",
     "TrainResult",

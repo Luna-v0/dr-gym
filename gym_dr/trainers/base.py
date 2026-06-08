@@ -80,12 +80,21 @@ class TrainingContext:
     ``world_plan[i]`` then the trainer swaps to ``world_plan[i+1]`` without
     restarting Gazebo. ``None`` (the default) means single-world training —
     the legacy one-``model.learn`` path. The first entry is the world Gazebo
-    already loaded at container startup (``WORLD_NAME``); the trainer does not
-    swap before the first chunk."""
+    loaded at container startup (``WORLD_NAME``); the trainer trusts it for the
+    first trial in a container, but an HPO worker that runs several trials
+    back-to-back re-pins the track to ``world_plan[0]`` at the start of every
+    later trial (the previous trial's rotation left a different world loaded)."""
 
     chunk_steps: int | None = None
     """Timesteps to train per world chunk before swapping. Only consulted when
     :attr:`world_plan` is set; falls back to ``training.total_timesteps``."""
+
+    eval_worlds: list[str] | None = None
+    """Ordered held-out worlds to evaluate on (from
+    ``WorldStrategy.evaluation_worlds``). When set, the trainer swaps the env to
+    each of these worlds at evaluation time, measures the policy, then restores
+    the current training world — giving a track-generalisation metric. ``None``
+    (default) means evaluate on the current training world."""
 
     def save_model(self, save_fn: Callable[[Path], None], *, name: str) -> Path:
         """Save a top-level model artifact with its DeepRacer metadata sidecar.
