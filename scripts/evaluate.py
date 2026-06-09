@@ -17,9 +17,14 @@ Flags:
                  real time. The training config's rtf_override (often 10+
                  for fast HPO) is *not* inherited — eval is for watching.
   --app PATH     optional. By default the experiment is reconstructed from
-                 the model's sibling run_config.json. Pass --app only if the
-                 run used callables defined inline in the script (which
-                 can't be resolved by import path).
+                 the model's run_config.json. Pass --app only if the run used
+                 callables defined inline in the script (which can't be
+                 resolved by import path).
+  --run-config PATH
+                 optional. Explicit run_config.json to reconstruct from.
+                 By default it's auto-discovered next to the model, then in
+                 the nearest parent directory — so a model in best_model/
+                 still finds the trial's run_config.json one level up.
 
 Host/container dispatch (same pattern as app.py):
 - On the host: reconstructs the experiment, pre-generates model_metadata.json,
@@ -49,27 +54,38 @@ def _container_mode() -> int:
 
     model = Path(os.environ["GYM_DR_EVAL_MODEL"])
     app = os.environ.get("GYM_DR_EVAL_APP") or None
+    run_config = os.environ.get("GYM_DR_EVAL_RUN_CONFIG") or None
     episodes = int(os.environ.get("GYM_DR_EVAL_EPISODES", "5"))
     loop = os.environ.get("GYM_DR_EVAL_LOOP", "0") == "1"
 
-    experiment = experiment_for_model(model, Path(app) if app else None)
-    run_evaluation(experiment, model, n_episodes=episodes, loop=loop)
+    run_config_path = Path(run_config) if run_config else None
+    experiment = experiment_for_model(
+        model, Path(app) if app else None, run_config_path
+    )
+    run_evaluation(
+        experiment, model, n_episodes=episodes, loop=loop,
+        run_config_path=run_config_path,
+    )
     return 0
 
 
 def _host_mode(args: argparse.Namespace) -> int:
     """On the host: reconstruct experiment, pre-gen metadata, spawn the GUI sim."""
     from gym_dr.action_space import write_model_metadata
+    from gym_dr.app import _default_image
     from gym_dr.docker_runner import spawn_training_chunk
     from gym_dr.evaluate import experiment_for_model
 
     project_dir = Path(os.getenv("PROJECT_DIR", _PROJECT_ROOT)).resolve()
     model_path = args.model.resolve()
     app_path = args.app.resolve() if args.app else None
+    run_config_path = args.run_config.resolve() if args.run_config else None
 
     to_check = [("model", model_path)]
     if app_path is not None:
         to_check.append(("app", app_path))
+    if run_config_path is not None:
+        to_check.append(("run-config", run_config_path))
     for label, p in to_check:
         if not p.exists():
             print(f"{label} not found: {p}", file=sys.stderr)
@@ -81,11 +97,13 @@ def _host_mode(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
 
-    experiment = experiment_for_model(model_path, app_path)
+    experiment = experiment_for_model(model_path, app_path, run_config_path)
     write_model_metadata(project_dir / "model_metadata.json", experiment.action_space)
 
     world = args.world or experiment.worlds.names[0]
-    image = os.getenv("IMAGE_TAG", "my-deepracer-project:cpu")
+    # Select the image the same way training/app.py does: match the
+    # experiment's GPU flag so the image arch and --gpus all stay in sync.
+    image = os.getenv("IMAGE_TAG") or _default_image(experiment.use_gpu)
 
     def to_container(p: Path) -> str:
         return f"/workspace/{p.relative_to(project_dir).as_posix()}"
@@ -104,6 +122,8 @@ def _host_mode(args: argparse.Namespace) -> int:
     }
     if app_path is not None:
         env["GYM_DR_EVAL_APP"] = to_container(app_path)
+    if run_config_path is not None:
+        env["GYM_DR_EVAL_RUN_CONFIG"] = to_container(run_config_path)
 
     print(f"[evaluate] world={world!r} model={model_path.name}  rtf={args.rtf}  "
           f"GUI on vnc://localhost:5900", flush=True)
@@ -129,7 +149,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Path to a trained SB3 .zip (inside the project dir)")
     parser.add_argument("--app", type=Path, default=None,
                         help="Optional experiment script override. Default: reconstruct "
-                             "from the model's sibling run_config.json")
+                             "from the model's run_config.json")
+    parser.add_argument("--run-config", type=Path, default=None,
+                        help="Explicit run_config.json to reconstruct the experiment from. "
+                             "Default: auto-discover next to the model, then in the nearest "
+                             "parent directory (e.g. the trial dir when the model is in "
+                             "best_model/)")
     parser.add_argument("--episodes", type=int, default=5,
                         help="Episodes to run (default 5; ignored with --loop)")
     parser.add_argument("--loop", action="store_true",

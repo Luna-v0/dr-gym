@@ -41,6 +41,7 @@ To turn this into a single (non-HPO) training run, swap the bottom-of-file
 ``experiments/ordered_split_example.py`` for the canonical multi-world
 ``train()`` reference.
 """
+
 from gym_dr import (
     TRACKS,
     ContinuousActionSpaceConfig,
@@ -64,7 +65,7 @@ from gym_dr.rewards import REWARD_VARIANTS
 # --------------------------------------------------------------------------- #
 STUDY_NAME = "tt_multiworld"
 N_TRIALS = 20
-N_PARALLEL = 7   # number of concurrent Docker workers (each runs its own simapp)
+N_PARALLEL = 4  # number of concurrent Docker workers (each runs its own simapp)
 
 # Per-trial training seeds, cycled by trial number in search_space() so the
 # search spreads across seeds instead of trusting one. NOT a TPE-optimised
@@ -85,23 +86,23 @@ SAMPLER_SEED = 42
 # and the reinvent_base starter track are intentionally excluded). Train and
 # eval sets are disjoint so eval reward measures transfer to UNSEEN tracks.
 TRAIN_WORLDS = [
-    "Spain_track",        # Circuit de Barcelona-Catalunya
-    "Monaco",             # European Seaside Circuit
-    "Austin",             # American Hills Speedway
-    "arctic_pro",         # Hot Rod Super Speedway
-    "caecer_gp",          # Vivalas Speedway
-    "penbay_pro",         # Po-Chun Super Speedway
+    "Spain_track",  # Circuit de Barcelona-Catalunya
+    "Monaco",  # European Seaside Circuit
+    "Austin",  # American Hills Speedway
+    "arctic_pro",  # Hot Rod Super Speedway
+    "caecer_gp",  # Vivalas Speedway
+    "penbay_pro",  # Po-Chun Super Speedway
 ]
 EVAL_WORLDS = [
-    "reInvent2019_track", # Smile Speedway
-    "Bowtie_track",       # Bowtie Track
-    "jyllandsringen_pro", # Cosmic Circuit
+    "reInvent2019_track",  # Smile Speedway
+    "Bowtie_track",  # Bowtie Track
+    "jyllandsringen_pro",  # Cosmic Circuit
 ]
-CHUNK_STEPS = 100_000      # timesteps trained per world before the track swap
-ROTATIONS = 1              # full passes through TRAIN_WORLDS per trial
+CHUNK_STEPS = 100_000  # timesteps trained per world before the track swap
+ROTATIONS = 1  # full passes through TRAIN_WORLDS per trial
 # Per-trial budget = CHUNK_STEPS x worlds x rotations. The MedianPruner warms
 # up as a fraction of this, so it must reflect the *real* per-trial total.
-TOTAL_TIMESTEPS = CHUNK_STEPS * len(TRAIN_WORLDS) * ROTATIONS   # 600k / trial
+TOTAL_TIMESTEPS = CHUNK_STEPS * len(TRAIN_WORLDS) * ROTATIONS  # 600k / trial
 
 # Fail fast on a typo or an accidental train/eval overlap — a bad world name
 # would otherwise only surface deep inside DeepRacerEnv.set_world (ValueError)
@@ -115,7 +116,7 @@ assert not _overlap, f"train/eval worlds must be disjoint; overlap: {_overlap}"
 
 base = ExperimentConfig(
     name=STUDY_NAME,
-    env_factory=time_trial,        # pure time-trial (no object_avoidance config)
+    env_factory=time_trial,  # pure time-trial (no object_avoidance config)
     trainer=Sb3Trainer(
         name="ppo",
         policy="MultiInputPolicy",
@@ -129,10 +130,10 @@ base = ExperimentConfig(
             "clip_range": 0.2,
             "n_epochs": 10,
         },
-        frame_stack=4,                  # temporal context (DeepRacerEnv emits single frames)
+        frame_stack=4,  # temporal context (DeepRacerEnv emits single frames)
         device="cuda",
     ),
-    reward=center_line,                 # time-trial reward (swept in search_space)
+    reward=center_line,  # time-trial reward (swept in search_space)
     action_space=ContinuousActionSpaceConfig(
         steering_low=-30.0,
         steering_high=30.0,
@@ -156,7 +157,7 @@ base = ExperimentConfig(
         rotations=ROTATIONS,
     ),
     training=TrainingConfig(
-        total_timesteps=TOTAL_TIMESTEPS,   # per-trial budget across all worlds
+        total_timesteps=TOTAL_TIMESTEPS,  # per-trial budget across all worlds
         checkpoint_freq=50_000,
         # Each eval rolls out n_eval_episodes on EVERY held-out world, so the
         # eval cost scales with len(EVAL_WORLDS). With 3 eval worlds, 50k keeps
@@ -166,7 +167,7 @@ base = ExperimentConfig(
         rtf_override=10,
     ),
     tracking=TrackingConfig(mlflow_experiment=STUDY_NAME),
-    #enable_gui=True,   # watch the car: VNC client -> localhost:5900
+    # enable_gui=True,   # watch the car: VNC client -> localhost:5900
     seed=SAMPLER_SEED,  # seeds the Optuna sampler; per-trial training seed is set in search_space
     use_gpu=True,
 )
@@ -188,10 +189,10 @@ def _sample_conv_layers(trial) -> tuple:
     n_refine = trial.suggest_int("cnn_refine_layers", 1, 3)
 
     layers = [
-        (base_ch, first_kernel, 4),   # downsample
-        (base_ch * 2, 4, 2),          # downsample
+        (base_ch, first_kernel, 4),  # downsample
+        (base_ch * 2, 4, 2),  # downsample
     ]
-    for _ in range(n_refine):         # stride-1 refinement (channels held)
+    for _ in range(n_refine):  # stride-1 refinement (channels held)
         layers.append((base_ch * 2, refine_kernel, 1))
     return tuple(layers)
 
@@ -225,14 +226,22 @@ def search_space(trial) -> dict:
     # --- PPO hyperparameters ------------------------------------------------
     overrides: dict = {
         "seed": seed,
-        "trainer.kwargs.learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-        "trainer.kwargs.ent_coef":      trial.suggest_float("ent_coef", 1e-4, 1e-1, log=True),
-        "trainer.kwargs.n_steps":       trial.suggest_categorical("n_steps", [128, 256, 512, 1024]),
-        "trainer.kwargs.batch_size":    trial.suggest_categorical("batch_size", [32, 64, 128, 256]),
-        "trainer.kwargs.gamma":         trial.suggest_float("gamma", 0.95, 0.999),
-        "trainer.kwargs.gae_lambda":    trial.suggest_float("gae_lambda", 0.9, 0.99),
-        "trainer.kwargs.clip_range":    trial.suggest_float("clip_range", 0.1, 0.3),
-        "trainer.kwargs.n_epochs":      trial.suggest_int("n_epochs", 4, 12),
+        "trainer.kwargs.learning_rate": trial.suggest_float(
+            "learning_rate", 1e-5, 1e-3, log=True
+        ),
+        "trainer.kwargs.ent_coef": trial.suggest_float(
+            "ent_coef", 1e-4, 1e-1, log=True
+        ),
+        "trainer.kwargs.n_steps": trial.suggest_categorical(
+            "n_steps", [128, 256, 512, 1024]
+        ),
+        "trainer.kwargs.batch_size": trial.suggest_categorical(
+            "batch_size", [32, 64, 128, 256]
+        ),
+        "trainer.kwargs.gamma": trial.suggest_float("gamma", 0.95, 0.999),
+        "trainer.kwargs.gae_lambda": trial.suggest_float("gae_lambda", 0.9, 0.99),
+        "trainer.kwargs.clip_range": trial.suggest_float("clip_range", 0.1, 0.3),
+        "trainer.kwargs.n_epochs": trial.suggest_int("n_epochs", 4, 12),
     }
 
     # --- Reward function -----------------------------------------------------
@@ -246,7 +255,9 @@ def search_space(trial) -> dict:
     overrides["reward"] = REWARD_VARIANTS[reward_name]
 
     # --- CNN tower: a named DeepRacer arch, or a custom sampled stack -------
-    cnn_arch = trial.suggest_categorical("cnn_arch", ["shallow", "standard", "deep", "custom"])
+    cnn_arch = trial.suggest_categorical(
+        "cnn_arch", ["shallow", "standard", "deep", "custom"]
+    )
     if cnn_arch == "custom":
         conv_layers = _sample_conv_layers(trial)
     else:

@@ -80,6 +80,12 @@ PROJECT_IMAGE="${PROJECT_IMAGE:-my-deepracer-project:${ARCH}}"
 step() { printf "\n\033[1;36m==> %s\033[0m\n" "$*"; }
 fail() { printf "\n\033[1;31m==> %s\033[0m\n" "$*" >&2; exit 1; }
 
+# Default branch of a remote repo URL (e.g. main or master); empty if unknown.
+remote_default_branch() {
+  git ls-remote --symref "$1" HEAD 2>/dev/null \
+    | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }'
+}
+
 # ---------- Preflight ----------
 
 step "Preflight checks"
@@ -131,6 +137,15 @@ if [[ ! -d "${UPSTREAM_DIR}/.git" ]]; then
     echo "Base image present and no local checkout — nothing to update."
   else
     step "Cloning upstream into ${UPSTREAM_DIR}"
+    # Fall back to the remote's default branch if the requested one is absent
+    # (handles main vs master across repos/forks).
+    if ! git ls-remote --exit-code --heads "${UPSTREAM_REPO}" "${UPSTREAM_BRANCH}" >/dev/null 2>&1; then
+      DEFAULT_BRANCH="$(remote_default_branch "${UPSTREAM_REPO}")"
+      [[ -n "${DEFAULT_BRANCH}" ]] || \
+        fail "Branch '${UPSTREAM_BRANCH}' not found on ${UPSTREAM_REPO} and its default branch is undetectable."
+      echo "Branch '${UPSTREAM_BRANCH}' not on remote — using default branch '${DEFAULT_BRANCH}'."
+      UPSTREAM_BRANCH="${DEFAULT_BRANCH}"
+    fi
     git clone --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" "${UPSTREAM_DIR}"
     echo "Cloned ${UPSTREAM_BRANCH} at $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)."
   fi
@@ -138,6 +153,14 @@ elif ! git -C "${UPSTREAM_DIR}" fetch --quiet origin; then
   echo "Warning: 'git fetch' on upstream failed (offline?) — using current checkout."
 else
   REMOTE_REF="origin/${UPSTREAM_BRANCH}"
+  # If the tracked branch isn't on the remote, fall back to its default branch.
+  if ! git -C "${UPSTREAM_DIR}" rev-parse --verify --quiet "${REMOTE_REF}^{commit}" >/dev/null 2>&1; then
+    DETECTED="$(git -C "${UPSTREAM_DIR}" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [[ -n "${DETECTED}" ]]; then
+      REMOTE_REF="${DETECTED}"
+      UPSTREAM_BRANCH="${DETECTED#origin/}"
+    fi
+  fi
   LOCAL_SHA="$(git -C "${UPSTREAM_DIR}" rev-parse HEAD)"
   REMOTE_SHA="$(git -C "${UPSTREAM_DIR}" rev-parse --verify --quiet "${REMOTE_REF}^{commit}" 2>/dev/null || true)"
   if [[ -z "${REMOTE_SHA}" ]]; then

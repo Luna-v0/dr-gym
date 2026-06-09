@@ -35,18 +35,23 @@ LOG = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 def experiment_for_model(
-    model_path: Path, app_path: Path | None = None
+    model_path: Path,
+    app_path: Path | None = None,
+    run_config_path: Path | None = None,
 ) -> ExperimentConfig:
     """Get the ``ExperimentConfig`` to evaluate ``model_path`` under.
 
     - With ``app_path``: load that experiment script directly. Use this if
       the run used callables defined *inline* in the script (which can't be
       resolved by import path).
-    - Without ``app_path`` (the default): reconstruct from the model's
-      sibling ``run_config.json``. Every training run writes that file with
-      the fully-resolved config — ``env_factory`` and ``reward`` as dotted
-      import paths, ``action_space`` as a dict, ``trainer.frame_stack`` —
-      which is everything evaluation needs. No ``app.py`` required.
+    - With ``run_config_path``: reconstruct from that explicit
+      ``run_config.json`` (the ``--run-config`` override).
+    - Otherwise (the default): reconstruct from the run_config.json found
+      next to the model, or — if the model sits in a subdir like
+      ``best_model/`` — in the nearest ancestor directory. Every training
+      run writes that file with the fully-resolved config (``env_factory``
+      and ``reward`` as dotted import paths, ``action_space`` as a dict,
+      ``trainer.frame_stack``), which is everything evaluation needs.
     """
     model_path = Path(model_path)
     if app_path is not None:
@@ -54,26 +59,54 @@ def experiment_for_model(
 
         return load_config(app_path)
 
-    run_config = _load_run_config(model_path)
+    run_config = _load_run_config(model_path, run_config_path)
     if run_config is None:
+        if run_config_path is not None:
+            raise FileNotFoundError(
+                f"--run-config {run_config_path} not found or not valid JSON"
+            )
         raise FileNotFoundError(
-            f"no run_config.json next to {model_path} — pass --app explicitly "
-            "(the run dir is the directory the model .zip lives in)"
+            f"no run_config.json found next to {model_path} or in any parent "
+            "directory — pass --run-config PATH (or --app) explicitly"
         )
     return _reconstruct_experiment(run_config)
 
 
-def _load_run_config(model_path: Path) -> dict | None:
-    for cfg_path in (
+def _find_run_config(model_path: Path, explicit: Path | None = None) -> Path | None:
+    """Locate the ``run_config.json`` governing ``model_path``.
+
+    Search order:
+      1. ``explicit`` if given (the ``--run-config`` override).
+      2. ``run_config.json`` next to the model, or ``<model>.run_config.json``.
+      3. ``run_config.json`` in the nearest ancestor directory — models are
+         often nested in a ``best_model/`` or ``checkpoints/`` subdir of the
+         run dir, with the config one level up.
+    """
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    model_path = Path(model_path)
+    siblings = (
         model_path.parent / "run_config.json",
         model_path.with_suffix(".run_config.json"),
-    ):
+    )
+    for cfg_path in siblings:
         if cfg_path.exists():
-            try:
-                return json.loads(cfg_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                return None
+            return cfg_path
+    for ancestor in model_path.parent.parents:
+        cfg_path = ancestor / "run_config.json"
+        if cfg_path.exists():
+            return cfg_path
     return None
+
+
+def _load_run_config(model_path: Path, explicit: Path | None = None) -> dict | None:
+    cfg_path = _find_run_config(model_path, explicit)
+    if cfg_path is None:
+        return None
+    try:
+        return json.loads(cfg_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _resolve_dotted(path: str):
@@ -109,9 +142,10 @@ def _reconstruct_experiment(rc: dict) -> ExperimentConfig:
 
     Only the pieces evaluation actually needs are reconstructed faithfully:
     ``env_factory`` + ``reward`` (resolved from their dotted paths),
-    ``action_space``, and ``trainer.frame_stack``. The policy architecture
-    is *not* rebuilt from config — SB3 loads it whole from the model zip —
-    so ``trainer.kwargs`` is intentionally left empty.
+    ``action_space``, ``trainer.frame_stack``, and ``use_gpu`` (so the host
+    launcher selects the matching image arch). The policy architecture is
+    *not* rebuilt from config — SB3 loads it whole from the model zip — so
+    ``trainer.kwargs`` is intentionally left empty.
     """
     from gym_dr.config import TrackingConfig, TrainingConfig, WorldsConfig
     from gym_dr.trainers import Sb3Trainer
@@ -132,6 +166,9 @@ def _reconstruct_experiment(rc: dict) -> ExperimentConfig:
             chunk_steps=int(worlds_d.get("chunk_steps", 50_000)),
             rotations=int(worlds_d.get("rotations", 1)),
         ),
+        # Carry through how the model was trained so the host launcher picks
+        # the matching image arch (gpu vs cpu) and GPU access.
+        use_gpu=bool(rc.get("use_gpu", False)),
         training=TrainingConfig(),
         tracking=TrackingConfig(),
     )
@@ -144,6 +181,7 @@ def run_evaluation(
     n_episodes: int = 5,
     loop: bool = False,
     frame_stack: int | None = None,
+    run_config_path: Path | None = None,
     step_log_every: int = 20,
 ) -> list[dict[str, Any]]:
     """Drive ``model_path`` through the env for inspection. Returns per-episode summaries.
@@ -169,7 +207,7 @@ def run_evaluation(
         raise FileNotFoundError(model_path)
 
     if frame_stack is None:
-        frame_stack = _frame_stack_from_run_config(model_path)
+        frame_stack = _frame_stack_from_run_config(model_path, run_config_path)
     LOG.info("evaluating %s (frame_stack=%d)", model_path, frame_stack)
 
     # Metrics wrapper gives us info["dr_episode"] summaries for free.
@@ -226,27 +264,22 @@ def run_evaluation(
 # Internals
 # --------------------------------------------------------------------------- #
 
-def _frame_stack_from_run_config(model_path: Path) -> int:
-    """Read ``trainer.frame_stack`` from the model's run dir, default 1.
+def _frame_stack_from_run_config(
+    model_path: Path, explicit: Path | None = None
+) -> int:
+    """Read ``trainer.frame_stack`` from the model's run_config.json, default 1.
 
-    Every training run writes ``run_config.json`` into the run dir alongside
-    the model zips. We look there first; if it's missing or doesn't carry
-    the field (e.g. a model produced before frame_stack existed), default 1.
+    Uses the same lookup as the experiment reconstruction (explicit override,
+    then sibling, then nearest ancestor). If the config is missing or doesn't
+    carry the field (e.g. a model produced before frame_stack existed),
+    default 1.
     """
-    candidates = [
-        model_path.parent / "run_config.json",
-        model_path.with_suffix(".run_config.json"),
-    ]
-    for cfg_path in candidates:
-        if cfg_path.exists():
-            try:
-                cfg = json.loads(cfg_path.read_text())
-                fs = cfg.get("trainer", {}).get("frame_stack")
-                if isinstance(fs, int) and fs >= 1:
-                    LOG.info("frame_stack=%d (from %s)", fs, cfg_path.name)
-                    return fs
-            except (json.JSONDecodeError, OSError):
-                pass
+    cfg = _load_run_config(model_path, explicit)
+    if cfg is not None:
+        fs = cfg.get("trainer", {}).get("frame_stack")
+        if isinstance(fs, int) and fs >= 1:
+            LOG.info("frame_stack=%d (from run_config)", fs)
+            return fs
     LOG.info("frame_stack not found in run_config — defaulting to 1")
     return 1
 
