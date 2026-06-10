@@ -1,6 +1,6 @@
 # DeepRacer SB3 Training Environment
 
-A Python-first, pluggable RL training pipeline for [`seresheim/deepracer-env`](https://github.com/seresheim/deepracer-env) inside Docker. The user owns a single `app.py` that wires together an env, a trainer, a reward function, an action space, and a list of worlds. Everything else (artifact layout, MLflow tracking, per-checkpoint DeepRacer metadata sidecars, Optuna HPO across parallel Docker workers, TensorBoard, multi-world sequential rotation) is provided by `gym_dr`.
+A Python-first, pluggable RL training pipeline for [`Luna-v0/deepracer-env`](https://github.com/Luna-v0/deepracer-env) (a fork of [`seresheim/deepracer-env`](https://github.com/seresheim/deepracer-env)) inside Docker. The user owns a single `app.py` that wires together an env, a trainer, a reward function, an action space, and a list of worlds. Everything else (artifact layout, MLflow tracking, per-checkpoint DeepRacer metadata sidecars, Optuna HPO across parallel Docker workers, TensorBoard, multi-world sequential rotation) is provided by `gym_dr`.
 
 ```text
 app.py                                ← user edits
@@ -38,12 +38,17 @@ The reward is a plain Python function (no registry). For HPO over reward weights
 ## First-time setup
 
 ```bash
-cd /mnt/hd/Repos/gym-dr
-./bootstrap.sh        # upstream simulator image + project image
-uv sync               # host-side Python deps
+cd /path/to/dr-gym
+./bootstrap.sh           # upstream simulator image + project image (use -a gpu for GPU)
+uv sync                  # host-side Python deps
 ```
 
-Re-run `./bootstrap.sh` only when `pyproject.toml` changes.
+`bootstrap.sh` tracks the upstream `deepracer-env` branch: a fresh machine
+clones its latest tip, and re-runs fetch the branch and **prompt** you to pull
++ rebuild the base image when it has advanced. Pass `-a gpu` to build the GPU
+image, `-b <branch>` to track a different upstream branch, and `--help` for all
+options. Re-run it when `pyproject.toml` changes or when you want to pick up
+upstream simulator updates.
 
 ## Running a training: `app.py`
 
@@ -80,6 +85,31 @@ Run it directly from the host — `train()` handles Docker, multi-world rotation
 uv run python app.py
 ```
 
+### Ready-to-run example: simple time-trial training
+
+For the quickest start, `experiments/time_trial_train.py` is a complete,
+no-HPO single training run: pure time-trial on one track (`reinvent_base`),
+a fixed set of PPO hyperparameters, and a straight `train(experiment)` call.
+Nothing to wire up — just run it:
+
+```bash
+uv run python experiments/time_trial_train.py
+```
+
+It has the **GUI on by default** — connect a VNC client to
+`vnc://localhost:5900` to watch the car as it trains — and runs the simulator
+at **2x real time** (`rtf_override=2`). Four knobs at the top of the file
+(`NAME`, `WORLD`, `TOTAL_TIMESTEPS`, `FRAME_STACK`) cover the common edits. It
+defaults to GPU (`device="cuda"` + `use_gpu=True`), matching the
+`my-deepracer-project:gpu` image; switch both to CPU if you only built that arch.
+
+When it finishes, watch the trained policy with the evaluator:
+
+```bash
+uv run python scripts/evaluate.py \
+    --model artifacts/time_trial_train/best_model/best_model.zip
+```
+
 ## Writing a custom reward
 
 Just write a function and pass it. The dict argument is the upstream DeepRacer reward-params dict — `track_width`, `distance_from_center`, `progress`, `speed`, `all_wheels_on_track`, `is_offtrack`, `waypoints`, etc. (See `.deepracer-env-upstream/deepracer_env/agent_ctrl/constants.py:108` for the full list.)
@@ -98,7 +128,7 @@ The reward function's source is auto-archived into `artifacts/<run_name>/reward_
 
 ## Multi-world training
 
-`WorldsConfig` controls how worlds are rotated. The simapp loads its world at container startup and **cannot** be switched at runtime today, so the host orchestrator runs each `(rotation, world)` chunk in its own container, resuming each chunk from the previous chunk's `latest_model.zip`. PPO's policy and optimizer state carry over cleanly; off-policy replay buffers don't (PPO has none).
+`WorldsConfig` controls how worlds are rotated. A **single** container trains the whole rotation in-process: Gazebo loads `names[0]` at startup, and the in-container trainer hot-swaps the track between each `(rotation, world)` chunk at runtime via `DeepRacerEnv.set_world` — no per-chunk container restart. Because it's one process, the policy, optimizer state, and TensorBoard session persist across switches naturally.
 
 ```python
 worlds=WorldsConfig(
@@ -108,7 +138,7 @@ worlds=WorldsConfig(
 )
 ```
 
-This runs **9 chunks** in order `reinvent_base → Bowtie_track → AmericasGeneratedInclStart → reinvent_base → ...`, each 20k timesteps, each resuming from the last. All chunks log under one MLflow parent run (named after `experiment.name`); the UI nests them as children for easy comparison.
+This runs **9 chunks** in order `reinvent_base → Bowtie_track → AmericasGeneratedInclStart → reinvent_base → ...`, each 20k timesteps, all in one container with the track hot-swapped between them. All chunks log under one MLflow parent run (named after `experiment.name`); the UI nests them as children for easy comparison.
 
 Valid world names are in `.deepracer-env-upstream/tracks.txt`. `gym_dr.TRACKS` is a `dict[world_name -> display_name]` covering every known track (re:Invent 2018, A to Z Speedway, Forever Raceway, etc.). To rotate through **every** track in one run:
 
@@ -230,9 +260,15 @@ Then point a VNC client at `localhost:5900`. Per-step and per-episode detail
 to your terminal.
 
 No `--app` needed — the experiment (env factory, reward, action space,
-frame-stack depth) is reconstructed from the model's sibling
-`run_config.json`, which every training run writes. Pass `--app <path>` only
+frame-stack depth, GPU flag) is reconstructed from the model's
+`run_config.json`, which every training run writes. It's auto-discovered next
+to the model, and — if the model lives in a subdir like `best_model/` — in the
+nearest parent directory, so a nested checkpoint still finds its run's config.
+Pass `--run-config <path>` to point at a specific one, or `--app <path>` only
 if the run used callables defined *inline* in the experiment script.
+
+The image is selected to match how the model was trained (`use_gpu` from the
+run_config → `my-deepracer-project:gpu` or `:cpu`); override with `IMAGE_TAG`.
 
 Flags:
 
@@ -242,6 +278,7 @@ Flags:
 | `--loop` | off | run forever until Ctrl-C — just watch |
 | `--world W` | model's training world | evaluate on a different track |
 | `--rtf R` | `1.0` | simulator real-time factor — `1.0` is human-watchable real time; the training config's `rtf_override` (often 10+ for fast HPO) is **not** inherited |
+| `--run-config PATH` | auto-discover (model dir, then nearest parent) | explicit `run_config.json` to reconstruct the experiment from |
 | `--app PATH` | reconstruct from `run_config.json` | experiment-script override for inline-callable runs |
 
 ## HPO
@@ -271,19 +308,17 @@ Project source is bind-mounted at `/workspace` in the container. Edit and re-run
 
 Rebuild only when `pyproject.toml` changes.
 
-## Future work — robust runtime world switching
+## Runtime world switching
 
-The current multi-world implementation rotates worlds by **respawning the container**. Each switch pays Gazebo's startup cost (~5–10 s). A more robust design would switch worlds *inside* a single running container so the policy, optimizer state, replay buffer, and TB session all persist.
+Earlier versions rotated worlds by **respawning the container**, paying Gazebo's startup cost (~5–10 s) per switch. The [`Luna-v0/deepracer-env`](https://github.com/Luna-v0/deepracer-env) fork this project builds on now switches worlds *inside a single running container*, so the policy, optimizer state, and TB session all persist across the rotation.
 
-Doing this cleanly requires changes to upstream [`seresheim/deepracer-env`](https://github.com/seresheim/deepracer-env):
+This required, in the fork:
 
-1. **`TrackData` must accept a setter.** Today it is a singleton that reads `WORLD_NAME` from `rospy` at first construction and caches waypoints from `routes/<name>.npy` for the rest of the process (`deepracer_env/track_geom/track_data.py:186–192`). We need a public `TrackData.set_world(name: str)` that drops the cached waypoints, re-reads the routes file, and notifies any subscriber that holds a reference to the geometry. Contract: must be called between episodes (between `env.reset()` and the first `env.step()` of the new episode), never mid-episode.
-2. **Gazebo world swap.** Use `gazebo_msgs/DeleteModel` on the current track meshes, then `gazebo_msgs/SpawnModel` on the new track's SDF. The simapp owns the world; this likely lives in `racetrack_with_racecar.launch`'s Python helpers.
-3. **`DeepRacerEnv.change_world(name: str)` hook.** Public method on the env that (a) calls into the simapp's world-swap RPC, (b) calls `TrackData.set_world(name)`, (c) resets the start position.
+1. **A `TrackData` setter.** It was a singleton that read `WORLD_NAME` from `rospy` at first construction and cached waypoints from `routes/<name>.npy` for the process lifetime. The fork adds a setter that drops the cached waypoints and re-reads the routes file, called between episodes (between `env.reset()` and the first `env.step()` of the new episode), never mid-episode.
+2. **A Gazebo world swap.** `gazebo_msgs/DeleteModel` on the current track meshes, then `gazebo_msgs/SpawnModel` on the new track's SDF.
+3. **`DeepRacerEnv.set_world(name)`.** The public env hook that performs the world-swap RPC, updates `TrackData`, and resets the start position.
 
-Once the upstream API exists, `gym_dr/envs/time_trial.py` exposes `env.change_world(...)` and the orchestrator rotates worlds mid-fit via an SB3 callback that fires every `WorldsConfig.chunk_steps` timesteps. The `WorldsConfig` semantics carry over unchanged — only the mechanism changes (no container respawn).
-
-A draft upstream issue/PR will be opened against `seresheim/deepracer-env` referencing this section.
+`gym_dr`'s orchestrator drives this: `train()` launches one container, and the in-container trainer calls `DeepRacerEnv.set_world(...)` between `WorldsConfig.chunk_steps`-sized chunks to walk the rotation — see `gym_dr/app.py`. `WorldsConfig` semantics are unchanged; only the mechanism is (no container respawn).
 
 ## Internal layout
 

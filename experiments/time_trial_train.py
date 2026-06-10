@@ -25,6 +25,7 @@ This uses GPU (``device="cuda"`` + ``use_gpu=True``) to match the built
 ``my-deepracer-project:gpu`` image. Switch both to CPU if you only have the
 cpu image built.
 """
+
 from gym_dr import (
     ContinuousActionSpaceConfig,
     ExperimentConfig,
@@ -40,16 +41,16 @@ from gym_dr import (
 # --------------------------------------------------------------------------- #
 # Knobs — edit these and re-run. Everything else below is wiring.
 # --------------------------------------------------------------------------- #
-NAME = "time_trial_train"
-WORLD = "reinvent_base"       # single track to train on (must be in gym_dr.TRACKS)
-TOTAL_TIMESTEPS = 500_000     # total environment steps to train for
-FRAME_STACK = 4               # temporal context (DeepRacerEnv emits single frames)
+NAME = "time_trial_demo"
+WORLD = "reinvent_base"  # single track to train on (must be in gym_dr.TRACKS)
+TOTAL_TIMESTEPS = 1_000_000  # total environment steps to train for
+FRAME_STACK = 4  # temporal context (DeepRacerEnv emits single frames)
 
 
 experiment = ExperimentConfig(
     name=NAME,
-    env_factory=time_trial,            # pure time-trial (no object_avoidance)
-    reward=center_line,                # a stable time-trial reward
+    env_factory=time_trial,  # pure time-trial (no object_avoidance)
+    reward=center_line,  # a stable time-trial reward
     # Fixed PPO hyperparameters — sensible, non-swept defaults.
     trainer=Sb3Trainer(
         name="ppo",
@@ -65,7 +66,7 @@ experiment = ExperimentConfig(
             "n_epochs": 10,
         },
         frame_stack=FRAME_STACK,
-        device="cuda",
+        # device="cuda",
     ),
     action_space=ContinuousActionSpaceConfig(
         steering_low=-30.0,
@@ -83,13 +84,13 @@ experiment = ExperimentConfig(
         checkpoint_freq=50_000,
         eval_freq=25_000,
         n_eval_episodes=3,
-        rtf_override=2,                # run the sim at 2x real time
+        rtf_override=10,  # run the sim at 10x real time
     ),
     tracking=TrackingConfig(mlflow_experiment=NAME),
     # Watch the car train over VNC: connect a client to vnc://localhost:5900.
     enable_gui=True,
     seed=42,
-    use_gpu=True,
+    # use_gpu=True,
 )
 
 

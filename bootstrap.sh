@@ -29,11 +29,17 @@ UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-${UPSTREAM_BRANCH_DEFAULT}}"
 
 usage() {
   cat <<EOF
-Usage: ./bootstrap.sh [-a cpu|gpu] [-u UPSTREAM_DIR] [-b UPSTREAM_BRANCH] [-h|--help]
+Usage: ./bootstrap.sh [-a cpu|gpu] [-u UPSTREAM_DIR] [-b UPSTREAM_BRANCH] [-f] [-h|--help]
 
 Builds the upstream deepracer-env simulator image (from
-${UPSTREAM_REPO_DEFAULT}) and then the project training image. Idempotent —
-present images and source dirs are reused.
+${UPSTREAM_REPO_DEFAULT}) and then the project training image.
+
+The base image is tagged with the upstream commit it was built from
+(deepracer-env:0.1-<arch>-<sha>), so a build is reused only when it matches
+the exact commit your source is checked out at — advancing the upstream
+source automatically triggers a rebuild, and stale bases can't be silently
+reused. The previous base image for the arch is removed after a successful
+rebuild (only the current commit's image is kept).
 
 Options:
   -a ARCH            Architecture: cpu (default) or gpu.
@@ -41,6 +47,8 @@ Options:
                      Default: ${UPSTREAM_DIR_DEFAULT}
   -b UPSTREAM_BRANCH Upstream branch to track (its latest tip is used).
                      Default: ${UPSTREAM_BRANCH_DEFAULT}
+  -f                 Force a base-image rebuild even if one already exists
+                     for the current commit (e.g. a previous build was bad).
   -h, --help         Show this help.
 
 Environment variables (overridden by the flags above):
@@ -58,11 +66,13 @@ for arg in "$@"; do
   esac
 done
 
-while getopts ":a:u:b:h" opt; do
+FORCE_REBUILD=0
+while getopts ":a:u:b:fh" opt; do
   case "${opt}" in
     a) ARCH="${OPTARG}" ;;
     u) UPSTREAM_DIR="${OPTARG}" ;;
     b) UPSTREAM_BRANCH="${OPTARG}" ;;
+    f) FORCE_REBUILD=1 ;;
     h) usage; exit 0 ;;
     \?) echo "Unknown option: -${OPTARG}" >&2; usage; exit 2 ;;
     :)  echo "Option -${OPTARG} requires a value" >&2; usage; exit 2 ;;
@@ -74,6 +84,9 @@ case "${ARCH}" in
   *) echo "Invalid ARCH '${ARCH}'. Must be 'cpu' or 'gpu'." >&2; exit 2 ;;
 esac
 
+# The generic tag upstream build.sh emits. We retag each build with the
+# upstream commit (BASE_IMAGE_VERSIONED, computed once the source is checked
+# out) and build the project image FROM that commit-specific tag.
 BASE_IMAGE="awsdeepracercommunity/deepracer-env:0.1-${ARCH}"
 PROJECT_IMAGE="${PROJECT_IMAGE:-my-deepracer-project:${ARCH}}"
 
@@ -122,33 +135,26 @@ echo "Docker daemon, buildx, git: OK."
 
 # ---------- Upstream source + update check ----------
 #
-# Fresh machine: clone the upstream repo and build from the latest tip of the
-# tracked branch. Re-run: if the branch has advanced on the remote, offer to
-# pull it and rebuild the base image; otherwise reuse what's there.
-
-REBUILD_BASE=0
-BASE_PRESENT=0
-docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1 && BASE_PRESENT=1
+# Fresh machine: clone the upstream repo at the latest tip of the tracked
+# branch. Re-run: if the branch has advanced on the remote, offer to pull it.
+# The actual rebuild decision is made below from the resulting commit — the
+# base image is keyed by commit, so advancing the source rebuilds on its own.
 
 step "Checking upstream (${UPSTREAM_REPO}, branch ${UPSTREAM_BRANCH})"
 
 if [[ ! -d "${UPSTREAM_DIR}/.git" ]]; then
-  if (( BASE_PRESENT == 1 )); then
-    echo "Base image present and no local checkout — nothing to update."
-  else
-    step "Cloning upstream into ${UPSTREAM_DIR}"
-    # Fall back to the remote's default branch if the requested one is absent
-    # (handles main vs master across repos/forks).
-    if ! git ls-remote --exit-code --heads "${UPSTREAM_REPO}" "${UPSTREAM_BRANCH}" >/dev/null 2>&1; then
-      DEFAULT_BRANCH="$(remote_default_branch "${UPSTREAM_REPO}")"
-      [[ -n "${DEFAULT_BRANCH}" ]] || \
-        fail "Branch '${UPSTREAM_BRANCH}' not found on ${UPSTREAM_REPO} and its default branch is undetectable."
-      echo "Branch '${UPSTREAM_BRANCH}' not on remote — using default branch '${DEFAULT_BRANCH}'."
-      UPSTREAM_BRANCH="${DEFAULT_BRANCH}"
-    fi
-    git clone --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" "${UPSTREAM_DIR}"
-    echo "Cloned ${UPSTREAM_BRANCH} at $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)."
+  step "Cloning upstream into ${UPSTREAM_DIR}"
+  # Fall back to the remote's default branch if the requested one is absent
+  # (handles main vs master across repos/forks).
+  if ! git ls-remote --exit-code --heads "${UPSTREAM_REPO}" "${UPSTREAM_BRANCH}" >/dev/null 2>&1; then
+    DEFAULT_BRANCH="$(remote_default_branch "${UPSTREAM_REPO}")"
+    [[ -n "${DEFAULT_BRANCH}" ]] || \
+      fail "Branch '${UPSTREAM_BRANCH}' not found on ${UPSTREAM_REPO} and its default branch is undetectable."
+    echo "Branch '${UPSTREAM_BRANCH}' not on remote — using default branch '${DEFAULT_BRANCH}'."
+    UPSTREAM_BRANCH="${DEFAULT_BRANCH}"
   fi
+  git clone --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" "${UPSTREAM_DIR}"
+  echo "Cloned ${UPSTREAM_BRANCH} at $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)."
 elif ! git -C "${UPSTREAM_DIR}" fetch --quiet origin; then
   echo "Warning: 'git fetch' on upstream failed (offline?) — using current checkout."
 else
@@ -181,35 +187,70 @@ else
       step "Updating upstream to ${REMOTE_REF}"
       git -C "${UPSTREAM_DIR}" checkout -B "${UPSTREAM_BRANCH}" "${REMOTE_REF}"
       echo "Upstream now at $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)."
-      REBUILD_BASE=1
     else
       echo "Keeping current checkout."
     fi
   fi
 fi
 
-# ---------- Base image (upstream) ----------
+# ---------- Base image (upstream), keyed by upstream commit ----------
 
-step "Checking base image: ${BASE_IMAGE}"
-if (( BASE_PRESENT == 1 )) && (( REBUILD_BASE == 0 )); then
-  echo "Base image already present, skipping upstream build."
+# Now that the source is at the commit we want, derive the commit-specific
+# base tag. A build is reused only when an image for this exact commit exists,
+# so a stale base can never be silently reused (the previous failure mode).
+BASE_SHA="$(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)"
+BASE_IMAGE_VERSIONED="awsdeepracercommunity/deepracer-env:0.1-${ARCH}-${BASE_SHA}"
+
+BUILT_BASE=0
+step "Checking base image: ${BASE_IMAGE_VERSIONED}"
+if (( FORCE_REBUILD == 0 )) && docker image inspect "${BASE_IMAGE_VERSIONED}" >/dev/null 2>&1; then
+  echo "Base image for ${BASE_SHA} already present, skipping upstream build."
 else
-  if (( REBUILD_BASE == 1 )); then
-    echo "Rebuilding base image to pick up the updated upstream source."
+  if (( FORCE_REBUILD == 1 )); then
+    echo "Force rebuild requested (-f)."
   fi
-  echo "Upstream HEAD: $(git -C "${UPSTREAM_DIR}" rev-parse --short HEAD)"
+  echo "No base image for upstream ${BASE_SHA} yet — building."
 
   step "Building base image via upstream build.sh -a ${ARCH} (this takes a while)"
   (cd "${UPSTREAM_DIR}" && ./build.sh -a "${ARCH}")
+
+  # build.sh emits the generic 0.1-<arch> tag; pin it to this commit.
+  docker tag "${BASE_IMAGE}" "${BASE_IMAGE_VERSIONED}"
+  echo "Tagged base image ${BASE_IMAGE_VERSIONED}."
+  BUILT_BASE=1
 fi
 
 # ---------- Project image ----------
 
-step "Building project image: ${PROJECT_IMAGE}"
+# Note the current project image's ID so we can reclaim it after rebuilding
+# onto the new base (it becomes an untagged orphan otherwise).
+PREV_PROJECT_ID="$(docker images --quiet --no-trunc "${PROJECT_IMAGE}" 2>/dev/null | head -n1)"
+
+step "Building project image: ${PROJECT_IMAGE} (FROM 0.1-${ARCH}-${BASE_SHA})"
 docker build \
-  --build-arg "SIMAPP_TAG=0.1-${ARCH}" \
+  --build-arg "SIMAPP_TAG=0.1-${ARCH}-${BASE_SHA}" \
   -t "${PROJECT_IMAGE}" \
   "${PROJECT_DIR}"
+
+# ---------- Reclaim the superseded base image (keep only this commit's) ----------
+#
+# Only after a fresh base build, and only once the project image has been
+# rebuilt onto the new base — so the old project image is now an orphan we can
+# drop, which in turn frees the old base (a tagged child blocks its removal).
+# All best-effort: cleanup never fails the bootstrap.
+if (( BUILT_BASE == 1 )); then
+  NEW_PROJECT_ID="$(docker images --quiet --no-trunc "${PROJECT_IMAGE}" 2>/dev/null | head -n1)"
+  if [[ -n "${PREV_PROJECT_ID}" && "${PREV_PROJECT_ID}" != "${NEW_PROJECT_ID}" ]]; then
+    docker rmi "${PREV_PROJECT_ID}" >/dev/null 2>&1 || true
+  fi
+  while IFS= read -r old; do
+    [[ -n "${old}" ]] || continue
+    echo "Removing superseded base image ${old}"
+    docker rmi "${old}" >/dev/null 2>&1 || true
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' \
+             | grep "^awsdeepracercommunity/deepracer-env:0.1-${ARCH}-" \
+             | grep -v -- "-${BASE_SHA}$")
+fi
 
 # ---------- Post-build sanity check ----------
 
