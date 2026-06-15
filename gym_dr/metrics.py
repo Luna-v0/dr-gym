@@ -11,6 +11,11 @@ What gets logged (every episode, averaged per rollout in TB/MLflow):
 - ``dr/ep_mean_speed``       — average ``speed`` across the episode's steps.
 - ``dr/ep_mean_steering_abs``— average ``|steering_angle|`` (proxy for jerky driving).
 - ``dr/ep_offtrack_rate``    — ``offtrack_count / steps`` (per-step rate).
+- ``dr/ep_ended_offtrack``   — ``1.0`` if the episode ended with the car
+  *fully* off the track (``is_offtrack`` — a real track-out reset, not just a
+  wheel over the line), else ``0.0``. During evaluation the eval callbacks sum
+  this per track into ``eval/<world>_offtrack_resets`` (and a global
+  ``eval/offtrack_resets``).
 
 Wiring is automatic. The orchestrator (``gym_dr/trainer.py``) wraps your
 reward callable with a recorder and the env with an episode finalizer
@@ -21,7 +26,7 @@ existing MLflow mirror callback re-publishes them as MLflow metrics.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple
 
@@ -51,7 +56,26 @@ class _EpisodeMetrics:
     max_progress: float = 0.0
     speed_sum: float = 0.0
     steering_abs_sum: float = 0.0
+    # Full-track-out status (``is_offtrack``) of the MOST RECENT step — the car
+    # entirely off the track, not just a wheel over the line. Read at the
+    # episode boundary to tell whether the episode ended *because* the car left
+    # the track (vs a lap completion or time truncation), surfaced as
+    # ``dr/ep_ended_offtrack``.
+    last_offtrack: bool = False
     use_eval_reward: bool = False
+
+    # --- Eval trajectory capture (optional; TrainingConfig.eval_path_plots) ---
+    # When ``capture_path`` is on, each step appends the car's (x, y) so the eval
+    # callbacks can plot the driven trajectory over the track skeleton. The
+    # skeleton (centerline ``waypoints`` + ``track_width``) is grabbed once per
+    # episode. ``capture_path`` is a mode flag (NOT reset per episode); the
+    # ``path_*`` / ``wp_*`` buffers ARE reset on each episode boundary.
+    capture_path: bool = False
+    path_x: list = field(default_factory=list)
+    path_y: list = field(default_factory=list)
+    wp_x: list = field(default_factory=list)
+    wp_y: list = field(default_factory=list)
+    track_width: float = 0.0
 
     # --- Tier-1 trace sink (optional; see gym_dr/trace.py) -----------------
     # These are mode-level, NOT reset per episode. The trainer updates
@@ -71,15 +95,28 @@ class _EpisodeMetrics:
         self.max_progress = 0.0
         self.speed_sum = 0.0
         self.steering_abs_sum = 0.0
-        # use_eval_reward is intentionally NOT reset — it's a mode flag
+        self.last_offtrack = False
+        self.path_x.clear()
+        self.path_y.clear()
+        self.wp_x.clear()
+        self.wp_y.clear()
+        self.track_width = 0.0
+        # capture_path / use_eval_reward are intentionally NOT reset — mode flags
         # toggled by the eval callback around evaluation episodes.
 
     def record_step(self, params: dict, reward: float, eval_reward: float = 0.0) -> None:
         self.steps += 1
         self.reward_sum += float(reward)
         self.eval_reward_sum += float(eval_reward)
+        # Per-step off-track RATE counts any wheel over the line (a partial
+        # off-track) — the soft, pre-existing signal.
         if params.get("is_offtrack", False) or not params.get("all_wheels_on_track", True):
             self.offtrack_count += 1
+        # The episode-end reset discriminator is the STRONGER condition: a full
+        # track-out (``is_offtrack``), i.e. the car entirely off the track —
+        # which is what actually terminates the episode. A wheel merely brushing
+        # the line does NOT count here.
+        self.last_offtrack = bool(params.get("is_offtrack", False))
         if params.get("is_crashed", False):
             self.crash_count += 1
         progress = float(params.get("progress", 0.0))
@@ -87,6 +124,21 @@ class _EpisodeMetrics:
             self.max_progress = progress
         self.speed_sum += float(params.get("speed", 0.0))
         self.steering_abs_sum += abs(float(params.get("steering_angle", 0.0)))
+
+        if self.capture_path:
+            x = params.get("x")
+            y = params.get("y")
+            if x is not None and y is not None:
+                self.path_x.append(float(x))
+                self.path_y.append(float(y))
+            # Grab the skeleton once per episode — waypoints/width are constant
+            # per world, so the first step that carries them is enough.
+            if not self.wp_x:
+                wps = params.get("waypoints") or []
+                if wps:
+                    self.wp_x = [float(p[0]) for p in wps]
+                    self.wp_y = [float(p[1]) for p in wps]
+                    self.track_width = float(params.get("track_width", 0.0))
 
         if self.sink is not None and self.sink.enabled:
             from gym_dr.trace import build_step_row
@@ -113,6 +165,29 @@ class _EpisodeMetrics:
             run_id=self.run_id,
         )
 
+    def path_payload(self) -> dict:
+        """Snapshot the just-finished episode's trajectory + skeleton for plots.
+
+        Returned at the terminal step in ``info["dr_episode_path"]`` (only when
+        ``capture_path`` is set) for the eval callbacks to render. ``status`` is
+        derived from the terminal off-track flag and peak progress so the chart
+        legend can label each episode (off-track / lap-complete / ended)."""
+        if self.last_offtrack:
+            status = "off-track"
+        elif self.max_progress >= 99.999:
+            status = "lap-complete"
+        else:
+            status = "ended"
+        return {
+            "x": list(self.path_x),
+            "y": list(self.path_y),
+            "wp_x": list(self.wp_x),
+            "wp_y": list(self.wp_y),
+            "track_width": self.track_width,
+            "status": status,
+            "progress": self.max_progress,
+        }
+
     def summary(self) -> dict[str, float]:
         n = max(self.steps, 1)
         return {
@@ -125,6 +200,10 @@ class _EpisodeMetrics:
             "dr/ep_mean_speed": self.speed_sum / n,
             "dr/ep_mean_steering_abs": self.steering_abs_sum / n,
             "dr/ep_offtrack_rate": self.offtrack_count / n,
+            # 1.0 if this episode ended with the car off-track (a track-out
+            # reset), 0.0 otherwise (lap completion / time truncation). Averaged
+            # per rollout in training; summed per eval into eval/*_offtrack_resets.
+            "dr/ep_ended_offtrack": 1.0 if self.last_offtrack else 0.0,
         }
 
 
@@ -186,6 +265,8 @@ class _MetricsEnvWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         if terminated or truncated:
             info = {**(info or {}), "dr_episode": self._state.summary()}
+            if self._state.capture_path:
+                info["dr_episode_path"] = self._state.path_payload()
             # Flush BEFORE the vec-env auto-resets, so the buffer is the
             # just-finished episode.
             self._state.flush_episode()

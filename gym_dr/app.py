@@ -47,6 +47,12 @@ from typing import Any, Callable
 
 from gym_dr.config import ExperimentConfig
 
+# Container exit code meaning "gzserver crashed mid-rotation; relaunch me to
+# resume from the checkpoint". Chosen as EX_TEMPFAIL (75) so it can't collide
+# with a normal 0/1 exit. Shared by _train_one_chunk (sets it) and _train_host
+# (acts on it).
+_SIM_RESTART_RC = 75
+
 
 def train(experiment: ExperimentConfig) -> Any:
     """Run a training. Mode-dispatched.
@@ -139,7 +145,19 @@ def _train_one_chunk(experiment: ExperimentConfig) -> float:
 
     from gym_dr.trainer import run_training
 
-    return run_training(experiment)
+    try:
+        return run_training(experiment)
+    except BaseException as ex:  # noqa: BLE001
+        # A mid-rotation gzserver segfault (WorldSwapError) is recoverable: the
+        # trainer has persisted rotation_resume.json. Exit with the agreed
+        # restart code so the host relaunches the container on the crashed
+        # world from the checkpoint. (Matched by class name to avoid importing
+        # deepracer_env on the host / in stub tests.)
+        if type(ex).__name__ == "WorldSwapError":
+            print("[train] gzserver died mid-rotation; exiting rc="
+                  f"{_SIM_RESTART_RC} for host-side container restart", flush=True)
+            sys.exit(_SIM_RESTART_RC)
+        raise
 
 
 def _train_host(experiment: ExperimentConfig) -> str | None:
@@ -178,27 +196,23 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     # the policy weights + PPO optimizer state in memory the whole time. The
     # container rebuilds the same strategy from the experiment script;
     # GYM_DR_ROTATE just switches the trainer into the rotation code path.
-    container_name = f"gym-dr-{experiment.name}"
-    env = {
+    base_env = {
         "GYM_DR_IN_CONTAINER": "1",
         "GYM_DR_ROTATE": "1",
-        "WORLD_NAME": first_world,
         "CHUNK_NAME": experiment.name,
         "MLFLOW_RUN_GROUP": experiment.name,
         "EXPERIMENT_PATH": container_experiment_path,
     }
-    if experiment.training.resume_from:
-        env["RESUME_FROM"] = experiment.training.resume_from
     if experiment.training.rtf_override is not None:
-        env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
+        base_env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
     if experiment.seed is not None:
         # Propagate the seed so a multi-seed host loop yields distinct,
         # reproducible per-seed runs (the container re-imports the script, so
         # the seed can't ride along on the experiment object — only via env).
-        env["SEED"] = str(experiment.seed)
+        base_env["SEED"] = str(experiment.seed)
     ports: list[tuple[int, int]] | None = None
     if experiment.enable_gui:
-        env["ENABLE_GUI"] = "True"
+        base_env["ENABLE_GUI"] = "True"
         ports = [(5900, 5900)]
 
     train_order = [c.world for c in chunks]
@@ -210,18 +224,59 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
         + ("  (GUI on vnc://localhost:5900)" if experiment.enable_gui else ""),
         flush=True,
     )
-    rc = spawn_training_chunk(
-        image_tag=image,
-        container_name=container_name,
-        base_env=env,
-        published_ports=ports,
-        use_gpu=experiment.use_gpu,
-    )
-    if rc != 0:
+
+    # Single-container rotation with crash recovery. Normally the one container
+    # runs the whole rotation. If gzserver segfaults mid-swap (an intermittent
+    # Gazebo bug on mesh delete_model), the container exits with _SIM_RESTART_RC
+    # after writing rotation_resume.json; we relaunch it on the crashed world,
+    # resuming from the checkpoint, and continue where it left off.
+    import json
+
+    artifacts_dir = Path(
+        os.getenv("ARTIFACTS_DIR", str(project_dir / "artifacts"))).resolve()
+    resume_file = artifacts_dir / experiment.name / "rotation_resume.json"
+    if resume_file.exists():  # clear stale state from a previous run
+        resume_file.unlink()
+
+    max_restarts = int(os.getenv("GYM_DR_MAX_SIM_RESTARTS", "20"))
+    start_index = 0
+    resume_from: str | None = experiment.training.resume_from
+    restarts = 0
+
+    while True:
+        env = dict(base_env)
+        env["WORLD_NAME"] = train_order[start_index]
+        env["ROTATE_START_INDEX"] = str(start_index)
+        if resume_from:
+            env["RESUME_FROM"] = resume_from
+        container_name = f"gym-dr-{experiment.name}" + (
+            f"-r{restarts}" if restarts else "")
+        rc = spawn_training_chunk(
+            image_tag=image,
+            container_name=container_name,
+            base_env=env,
+            published_ports=ports,
+            use_gpu=experiment.use_gpu,
+        )
+        if rc == 0:
+            return f"/workspace/artifacts/{experiment.name}/latest_model.zip"
+
+        if rc == _SIM_RESTART_RC and restarts < max_restarts and resume_file.exists():
+            state = json.loads(resume_file.read_text(encoding="utf-8"))
+            start_index = int(state["start_index"])
+            resume_from = state.get("resume_from")
+            resume_file.unlink()
+            restarts += 1
+            print(
+                f"[train] gzserver crashed mid-rotation; relaunching on chunk "
+                f"{start_index + 1}/{n_chunks} (world={train_order[start_index]!r}) "
+                f"from {resume_from!r} [restart {restarts}/{max_restarts}]",
+                flush=True,
+            )
+            continue
+
         print(f"[train] container {container_name} exited rc={rc}; aborting", flush=True)
         return None
-
-    return f"/workspace/artifacts/{experiment.name}/latest_model.zip"
 
 
 # ----------------------------------- HPO ----------------------------------- #

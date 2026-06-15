@@ -102,6 +102,27 @@ class Sb3Trainer:
         model._last_obs = vec.reset()
         model._last_episode_starts = np.ones((vec.num_envs,), dtype=bool)
 
+    @staticmethod
+    def _write_rotation_resume(ctx: TrainingContext, start_index: int) -> None:
+        """Persist the chunk index + checkpoint to resume from after a
+        gzserver crash, so the host can relaunch the container and continue
+        the rotation. The checkpoint itself is written by fit's ``finally``
+        (``latest_model.zip``) as the exception unwinds."""
+        import json
+
+        state = {
+            "start_index": int(start_index),
+            "resume_from": str(ctx.run_dir / "latest_model.zip"),
+        }
+        try:
+            (ctx.run_dir / "rotation_resume.json").write_text(
+                json.dumps(state) + "\n", encoding="utf-8")
+            print("[Sb3Trainer] gzserver died mid-swap; wrote "
+                  "rotation_resume.json {}".format(state), flush=True)
+        except Exception as ex:  # noqa: BLE001
+            print("[Sb3Trainer] failed to write rotation_resume.json:", ex,
+                  flush=True)
+
     def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
         from stable_baselines3.common.callbacks import CallbackList
         from stable_baselines3.common.vec_env import (
@@ -272,12 +293,29 @@ class Sb3Trainer:
                 # Mark up front: any later trial must treat the world as dirty
                 # even if this trial crashes partway through the rotation.
                 type(self)._boot_world_consumed = True
+                # rotate_start_index > 0 means the host relaunched this
+                # container to recover from a mid-rotation gzserver crash:
+                # Gazebo booted on world_plan[start] and we resume from there,
+                # skipping the already-completed chunks.
+                start = max(0, min(int(ctx.rotate_start_index or 0),
+                                   len(ctx.world_plan) - 1))
                 if reused_container:
                     model._last_obs = model.get_env().reset()
-                    self._swap_world(model, ctx.world_plan[0])
-                for i, world in enumerate(ctx.world_plan):
-                    if i > 0:
-                        self._swap_world(model, world)
+                    self._swap_world(model, ctx.world_plan[start])
+                for i in range(start, len(ctx.world_plan)):
+                    world = ctx.world_plan[i]
+                    # Swap on every chunk except the first one we execute — the
+                    # boot/pinned world is already world_plan[start].
+                    if i > start:
+                        try:
+                            self._swap_world(model, world)
+                        except Exception as ex:  # noqa: BLE001
+                            # gzserver segfaulted mid-swap (WorldSwapError):
+                            # persist where to resume so the host can relaunch
+                            # the container on this world from the checkpoint.
+                            if type(ex).__name__ == "WorldSwapError":
+                                self._write_rotation_resume(ctx, i)
+                            raise
                     # Stamp the trace's world context so every step row written
                     # this chunk carries the right hot-swapped world + a chunk
                     # counter that distinguishes repeated rotations of the same

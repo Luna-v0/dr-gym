@@ -97,6 +97,75 @@ def stub_env_factory(experiment: ExperimentConfig) -> Any:
     )
 
 
+class OffTrackStubEnv(StubDeepRacerEnv):
+    """Stub whose every episode ends with a FULL track-out (``is_offtrack``).
+
+    Short 4-step episodes so eval rollouts finish fast; the terminal step
+    reports ``is_offtrack=True`` (car entirely off track) so each finished
+    episode counts as a track-out reset for the ``eval/*_offtrack_resets``
+    metric.
+    """
+
+    def step(self, action):
+        self._step += 1
+        terminated = self._step >= 4
+        params = {
+            "track_width": 1.0,
+            "distance_from_center": 0.0,
+            "all_wheels_on_track": not terminated,
+            "progress": min(self._step / 64.0, 1.0),
+            "speed": float(action[1]),
+            "steering_angle": float(action[0]),
+            "is_offtrack": bool(terminated),
+        }
+        reward = float(self._reward_fn(params))
+        return self._obs(), reward, terminated, False, {}
+
+
+def offtrack_env_factory(experiment: ExperimentConfig) -> Any:
+    return OffTrackStubEnv(
+        reward_fn=experiment.reward,
+        sensors=list(experiment.action_space.sensor),
+    )
+
+
+class PathStubEnv(StubDeepRacerEnv):
+    """Stub that emits the geometry the eval path plots need: per-step ``x``/``y``
+    along a circle plus a ``waypoints`` skeleton + ``track_width``."""
+
+    _WAYPOINTS = [
+        [float(np.cos(a)), float(np.sin(a))]
+        for a in np.linspace(0, 2 * np.pi, 24, endpoint=False)
+    ]
+
+    def step(self, action):
+        self._step += 1
+        ang = self._step / 4.0
+        terminated = self._step >= 6
+        params = {
+            "track_width": 0.5,
+            "distance_from_center": 0.0,
+            "all_wheels_on_track": not terminated,
+            "progress": min(self._step / 6.0, 1.0),
+            "speed": float(action[1]),
+            "steering_angle": float(action[0]),
+            "is_offtrack": bool(terminated),
+            "x": float(np.cos(ang)),
+            "y": float(np.sin(ang)),
+            "heading": 0.0,
+            "waypoints": self._WAYPOINTS,
+        }
+        reward = float(self._reward_fn(params))
+        return self._obs(), reward, terminated, False, {}
+
+
+def path_env_factory(experiment: ExperimentConfig) -> Any:
+    return PathStubEnv(
+        reward_fn=experiment.reward,
+        sensors=list(experiment.action_space.sensor),
+    )
+
+
 # --- fixtures ---------------------------------------------------------------
 
 
@@ -225,6 +294,51 @@ def test_runtime_world_rotation_swaps_in_process(container_mode, monkeypatch):
     assert (run_dir / "latest_model.zip").exists()
 
 
+def test_rotation_crash_writes_resume_and_restart_code(container_mode, monkeypatch):
+    """If gzserver dies mid-swap (set_world raises WorldSwapError), the trainer
+    persists rotation_resume.json (chunk index + checkpoint) and the container
+    exits with _SIM_RESTART_RC so the host can relaunch and resume the rotation."""
+    import json
+
+    from gym_dr.trainers.sb3 import Sb3Trainer
+
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+    # Deterministic: treat this as the first trial (trust boot world, no pin).
+    monkeypatch.setattr(Sb3Trainer, "_boot_world_consumed", False, raising=False)
+
+    class WorldSwapError(RuntimeError):
+        pass
+
+    orig = StubDeepRacerEnv.set_world
+
+    def crash_on_world_b(self, world_name):
+        if world_name == "world_b":
+            raise WorldSwapError("simulated gzserver segfault")
+        return orig(self, world_name)
+
+    monkeypatch.setattr(StubDeepRacerEnv, "set_world", crash_on_world_b)
+
+    exp = _experiment("crash_run", tmp_path, total_timesteps=64).with_overrides(
+        worlds=WorldsConfig(
+            names=["world_a", "world_b", "world_c"], chunk_steps=64, rotations=1),
+    )
+
+    with pytest.raises(SystemExit) as ei:
+        train(exp)
+    assert ei.value.code == 75, ei.value.code
+
+    run_dir = tmp_path / "artifacts" / "crash_run"
+    resume = run_dir / "rotation_resume.json"
+    assert resume.exists(), "rotation_resume.json not written"
+    state = json.loads(resume.read_text())
+    assert state["start_index"] == 1, state  # crashed swapping to world_b (idx 1)
+    assert state["resume_from"].endswith("latest_model.zip"), state
+    # chunk 0 (world_a) trained before the crash, so there's a checkpoint to
+    # resume from.
+    assert (run_dir / "latest_model.zip").exists()
+
+
 def test_reused_worker_repins_world_before_first_chunk(container_mode, monkeypatch):
     """A worker runs several HPO trials back-to-back in one container, and the
     Gazebo world persists across them. The first trial trusts the boot world,
@@ -301,6 +415,89 @@ def test_ordered_split_evaluates_on_held_out_worlds(container_mode, monkeypatch)
 
     run_dir = tmp_path / "artifacts" / "ordered_split"
     assert (run_dir / "latest_model.zip").exists()
+
+
+def test_eval_offtrack_resets_logged_per_world_and_global(container_mode, monkeypatch):
+    """Each held-out eval world gets its own ``eval/<world>_offtrack_resets``
+    track-out count, plus a global ``eval/offtrack_resets`` summed across worlds.
+
+    The off-track stub ends every episode fully off the track, so with
+    ``n_eval_episodes=1`` each of the two eval worlds tallies 1 reset and the
+    global tally is 2.
+    """
+    from tensorboard.backend.event_processing import event_accumulator
+
+    from gym_dr import OrderedSplit
+
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    exp = _experiment("offtrack_eval", tmp_path, total_timesteps=64, eval_freq=64).with_overrides(
+        env_factory=offtrack_env_factory,
+        world_strategy=OrderedSplit(
+            train_worlds=["train_a", "train_b"],
+            eval_worlds=["eval_x", "eval_y"],
+            chunk_steps=64,
+            rotations=1,
+        ),
+    )
+    train(exp)
+
+    tb_root = tmp_path / "artifacts" / "offtrack_eval" / "tensorboard"
+    sub = next((p for p in tb_root.rglob("events.out.tfevents.*")), None)
+    assert sub is not None, f"no TB event files under {tb_root}"
+    acc = event_accumulator.EventAccumulator(str(sub.parent))
+    acc.Reload()
+    tags = set(acc.Tags().get("scalars", []))
+
+    for tag in ("eval/offtrack_resets", "eval/eval_x_offtrack_resets", "eval/eval_y_offtrack_resets"):
+        assert tag in tags, f"missing {tag}; got {sorted(tags)}"
+
+    # Every eval episode ended off-track: 1 per world, 2 globally.
+    assert acc.Scalars("eval/eval_x_offtrack_resets")[-1].value == 1.0
+    assert acc.Scalars("eval/eval_y_offtrack_resets")[-1].value == 1.0
+    assert acc.Scalars("eval/offtrack_resets")[-1].value == 2.0
+
+
+def test_eval_path_plots_logged_as_tb_images(container_mode, monkeypatch):
+    """With ``eval_path_plots=True`` each eval world logs a trajectory overlay
+    image plus one image per eval episode to TensorBoard's Images tab."""
+    from tensorboard.backend.event_processing import event_accumulator
+
+    from gym_dr import OrderedSplit
+
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    exp = _experiment("path_plots", tmp_path, total_timesteps=64, eval_freq=64).with_overrides(
+        env_factory=path_env_factory,
+        world_strategy=OrderedSplit(
+            train_worlds=["train_a", "train_b"],
+            eval_worlds=["eval_x", "eval_y"],
+            chunk_steps=64,
+            rotations=1,
+        ),
+        **{"training.eval_path_plots": True},
+    )
+    train(exp)
+
+    tb_root = tmp_path / "artifacts" / "path_plots" / "tensorboard"
+    sub = next((p for p in tb_root.rglob("events.out.tfevents.*")), None)
+    assert sub is not None, f"no TB event files under {tb_root}"
+    acc = event_accumulator.EventAccumulator(
+        str(sub.parent), size_guidance={"images": 0}
+    )
+    acc.Reload()
+    img_tags = set(acc.Tags().get("images", []))
+
+    # n_eval_episodes=1 -> one overlay + one per-episode image per eval world.
+    for tag in (
+        "eval_paths/eval_x",
+        "eval_paths/eval_x/ep0",
+        "eval_paths/eval_y",
+        "eval_paths/eval_y/ep0",
+    ):
+        assert tag in img_tags, f"missing image tag {tag}; got {sorted(img_tags)}"
 
 
 def test_multiworld_study_enables_rotation(tmp_path, monkeypatch):

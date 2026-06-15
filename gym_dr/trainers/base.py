@@ -89,6 +89,13 @@ class TrainingContext:
     """Timesteps to train per world chunk before swapping. Only consulted when
     :attr:`world_plan` is set; falls back to ``training.total_timesteps``."""
 
+    rotate_start_index: int = 0
+    """Index into :attr:`world_plan` at which to (re)start the rotation. ``0``
+    for a fresh run; ``> 0`` when the host relaunched the container to recover
+    from a mid-rotation ``gzserver`` crash — the already-completed chunks are
+    skipped and training resumes from this chunk's world (which Gazebo loaded
+    at startup) using ``training.resume_from``."""
+
     eval_worlds: list[str] | None = None
     """Ordered held-out worlds to evaluate on (from
     ``WorldStrategy.evaluation_worlds``). When set, the trainer swaps the env to

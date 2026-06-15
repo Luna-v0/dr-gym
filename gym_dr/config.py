@@ -89,6 +89,15 @@ class TrainingConfig:
     """Episodes per eval rollout. Higher = lower-variance eval reward at the
     cost of wall-clock during eval."""
 
+    eval_path_plots: bool = False
+    """When ``True``, each evaluation renders the car's driven trajectory over a
+    skeleton of the track and logs it to TensorBoard's *Images* tab — one
+    overlay chart per eval world (all ``n_eval_episodes`` traces, colour + legend
+    per episode) plus one chart per individual episode. Off by default: image
+    logging is heavier than scalars and buffers each eval episode's ``(x, y)``
+    path. The geometry comes straight from the env's reward params
+    (``x``/``y``/``waypoints``/``track_width``) — no DeepRacerEnv change needed."""
+
 
 @dataclass(frozen=True)
 class TrackingConfig:

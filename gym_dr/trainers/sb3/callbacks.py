@@ -13,6 +13,65 @@ from stable_baselines3.common.callbacks import (
 )
 
 
+def _make_eval_collector(
+    capture_paths: bool = False,
+) -> tuple[Any, dict[str, int], list[dict]]:
+    """Build an ``evaluate_policy`` step-callback that mines finished episodes.
+
+    ``evaluate_policy`` calls the callback once per env step with ``locals()``
+    exposing the current ``done`` flag and ``info`` dict. On each *done* step we
+    read what the metrics wrapper stamped into ``info``:
+
+    - ``info["dr_episode"]["dr/ep_ended_offtrack"]`` — bumps ``count["n"]`` so it
+      ends up as the number of eval episodes that terminated off-track.
+    - ``info["dr_episode_path"]`` (only present when ``capture_path`` is on) — the
+      episode's trajectory + skeleton, appended to ``episodes`` for plotting.
+
+    Returns ``(callback, count, episodes)``; the caller reads them after
+    ``evaluate_policy`` returns.
+    """
+    count = {"n": 0}
+    episodes: list[dict] = []
+
+    def _cb(locals_: dict, _globals: dict) -> None:
+        if not locals_.get("done"):
+            return
+        info = locals_.get("info") or {}
+        if not isinstance(info, dict):
+            return
+        summary = info.get("dr_episode")
+        if summary and summary.get("dr/ep_ended_offtrack", 0.0):
+            count["n"] += 1
+        if capture_paths:
+            path = info.get("dr_episode_path")
+            if path:
+                episodes.append(path)
+
+    return _cb, count, episodes
+
+
+def _log_eval_paths(logger: Any, world: str, timestep: int, episodes: list[dict]) -> None:
+    """Render the eval trajectories for *world* and log them as TB images.
+
+    One overlay figure (all episodes, colour + legend per episode) plus one
+    figure per individual episode. No-op when there are no captured episodes.
+    Matplotlib/plot imports are deferred here so they're only paid when
+    ``TrainingConfig.eval_path_plots`` is enabled.
+    """
+    if not episodes:
+        return
+    from stable_baselines3.common.logger import Figure
+
+    from gym_dr.trainers.sb3.plots import render_episode, render_overlay
+
+    exclude = ("stdout", "log", "json", "csv")
+    overlay = render_overlay(world, timestep, episodes)
+    logger.record(f"eval_paths/{world}", Figure(overlay, close=True), exclude=exclude)
+    for i, ep in enumerate(episodes):
+        fig = render_episode(world, timestep, i, ep)
+        logger.record(f"eval_paths/{world}/ep{i}", Figure(fig, close=True), exclude=exclude)
+
+
 def update_training_status(run_dir: Path, status: str, extra: dict[str, Any] | None = None) -> None:
     payload: dict[str, Any] = {
         "status": status,
@@ -68,18 +127,53 @@ class CtxEvalCallback(EvalCallback):
     def __init__(self, *args: Any, ctx, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._ctx = ctx
+        self._offtrack_resets = 0
+        self._eval_episodes: list[dict] = []
+
+    def _log_success_callback(self, locals_: dict, globals_: dict) -> None:
+        # Keep SB3's success-rate bookkeeping, then additionally tally eval
+        # episodes that ended with the car off-track (a track-out reset) and, if
+        # path plots are enabled, collect each episode's trajectory.
+        super()._log_success_callback(locals_, globals_)
+        if not locals_.get("done"):
+            return
+        info = locals_.get("info") or {}
+        if not isinstance(info, dict):
+            return
+        summary = info.get("dr_episode")
+        if summary and summary.get("dr/ep_ended_offtrack", 0.0):
+            self._offtrack_resets += 1
+        path = info.get("dr_episode_path")
+        if path:
+            self._eval_episodes.append(path)
 
     def _on_step(self) -> bool:
         is_eval_step = self.eval_freq > 0 and self.n_calls % self.eval_freq == 0
         state = getattr(self._ctx, "metrics_state", None)
         if is_eval_step and state is not None:
             state.use_eval_reward = True
+        if is_eval_step:
+            self._offtrack_resets = 0
+            self._eval_episodes = []
         try:
             proceed = super()._on_step()
         finally:
             if state is not None:
                 state.use_eval_reward = False
         if is_eval_step:
+            # Track-out resets for this eval. Single-world path, so the per-track
+            # series and the global series coincide; log both so the metric name
+            # is consistent with the multi-world callback.
+            self.logger.record("eval/offtrack_resets", float(self._offtrack_resets))
+            world = getattr(state, "world_name", None)
+            if world:
+                self.logger.record(
+                    f"eval/{world}_offtrack_resets", float(self._offtrack_resets)
+                )
+            if self._eval_episodes and world:
+                _log_eval_paths(
+                    self.logger, world, int(self.num_timesteps), self._eval_episodes
+                )
             if self.best_model_save_path is not None:
                 best_zip = Path(self.best_model_save_path) / "best_model.zip"
                 if best_zip.exists():
@@ -150,20 +244,27 @@ class MultiWorldEvalCallback(BaseCallback):
         train_world = getattr(state, "world_name", None)
         vec = self.model.get_env()
 
+        capture_paths = bool(getattr(self._ctx.training, "eval_path_plots", False))
         per_world: dict[str, float] = {}
+        offtrack_per_world: dict[str, int] = {}
         if state is not None:
             state.use_eval_reward = True
         try:
             for world in self.eval_worlds:
                 self._swap(vec, world)
+                eval_cb, offtrack_count, episodes = _make_eval_collector(capture_paths)
                 mean_reward, _ = evaluate_policy(
                     self.model,
                     vec,
                     n_eval_episodes=self.n_eval_episodes,
                     deterministic=self.deterministic,
                     warn=False,
+                    callback=eval_cb,
                 )
                 per_world[world] = float(mean_reward)
+                offtrack_per_world[world] = offtrack_count["n"]
+                if capture_paths:
+                    _log_eval_paths(self.logger, world, int(self.num_timesteps), episodes)
             # Restore the world training was on so the next rollout continues
             # on the right track (the env is shared with training).
             if train_world is not None:
@@ -178,6 +279,12 @@ class MultiWorldEvalCallback(BaseCallback):
             self.logger.record(f"eval/{world}_mean_reward", m)
         self.logger.record("eval/mean_reward", agg)
         self.logger.record("eval/n_worlds", float(len(per_world)))
+        # Track-out resets: per-track count + a global sum across eval worlds.
+        for world, n_off in offtrack_per_world.items():
+            self.logger.record(f"eval/{world}_offtrack_resets", float(n_off))
+        self.logger.record(
+            "eval/offtrack_resets", float(sum(offtrack_per_world.values()))
+        )
 
         if per_world and agg > self.best_mean_reward:
             self.best_mean_reward = agg

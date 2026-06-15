@@ -153,6 +153,9 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     # container start). Multi-world rotations update this per chunk in
     # Sb3Trainer.fit around each set_world swap; single-world runs keep it.
     metrics_state.world_name = os.getenv("WORLD_NAME") or strategy.first_world()
+    # Opt-in eval trajectory plots: buffer each episode's (x, y) + the skeleton
+    # so the eval callbacks can render the driven path to TensorBoard.
+    metrics_state.capture_path = bool(experiment.training.eval_path_plots)
 
     _write_json(run_dir / "run_config.json", experiment.to_dict())
     _update_status(run_dir, "initialized")
@@ -168,12 +171,16 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     # ``model.learn`` path.
     world_plan: list[str] | None = None
     chunk_steps: int | None = None
+    rotate_start_index = 0
     if os.getenv("GYM_DR_ROTATE"):
         chunks = strategy.training_chunks()
         world_plan = [c.world for c in chunks]
         # Uniform chunk length today (the shipped strategies emit equal steps);
         # the trainer trains chunk_steps per world.
         chunk_steps = chunks[0].steps if chunks else None
+        # Set by the host when relaunching the container to recover from a
+        # mid-rotation gzserver crash: skip the chunks already completed.
+        rotate_start_index = int(os.getenv("ROTATE_START_INDEX", "0"))
 
     # Evaluation worlds are independent of the training rotation: a held-out
     # eval list (OrderedSplit) is measured even for single-world training.
@@ -188,6 +195,7 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
         metrics_state=metrics_state,
         world_plan=world_plan,
         chunk_steps=chunk_steps,
+        rotate_start_index=rotate_start_index,
         eval_worlds=eval_worlds or None,
     )
 
