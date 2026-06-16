@@ -362,6 +362,9 @@ class Sb3Trainer:
                 "time_limit_reached": bool(
                     wall_clock_callback and wall_clock_callback.time_limit_reached
                 ),
+                # True if any chunk ended early because the car mastered the track
+                # (stayed on it during evaluation). See TrainingConfig.early_stop_*.
+                "early_stopped": bool(getattr(eval_callback, "early_stops", 0)),
                 "elapsed_seconds": int(time.monotonic() - started_at),
                 "timesteps_completed": int(model.num_timesteps),
             },

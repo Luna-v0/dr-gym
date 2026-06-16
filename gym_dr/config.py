@@ -44,6 +44,8 @@ class TrainingConfig:
     - ``rtf_override``     — Gazebo real-time-factor hint.
     - ``eval_freq``        — how often the eval callback rolls out the policy.
     - ``n_eval_episodes``  — episodes per eval.
+    - ``early_stop_*``     — stop a chunk early once the car masters the track
+      (stays on it during evaluation); advances the rotation / ends the run.
     """
 
     total_timesteps: int = 500_000
@@ -106,6 +108,30 @@ class TrainingConfig:
     logging is heavier than scalars and buffers each eval episode's ``(x, y)``
     path. The geometry comes straight from the env's reward params
     (``x``/``y``/``waypoints``/``track_width``) — no DeepRacerEnv change needed."""
+
+    early_stop_enabled: bool = False
+    """Master switch for the track-mastery early stop. When ``True``, the eval
+    callback ends the current chunk's ``model.learn`` as soon as the policy
+    *masters* the track during evaluation (see ``early_stop_max_offtrack_rate``).
+    In a multi-world rotation that hands off to the next track; in a single-track
+    run it ends the experiment. Off by default — runs train the full
+    ``total_timesteps`` / ``chunk_steps`` regardless of how well the car drives."""
+
+    early_stop_max_offtrack_rate: float = 0.0
+    """Mastery threshold: stop early when the fraction of an evaluation round's
+    episodes that ended with the car *off the track* is ``<=`` this value.
+    ``0.0`` (default) is strict — the car must complete every eval episode
+    without leaving the track; ``0.5`` allows up to half of them to track-out.
+    Measured over all ``n_eval_episodes`` (× the number of held-out eval worlds,
+    when an ``OrderedSplit`` eval set is configured). Only consulted when
+    ``early_stop_enabled``."""
+
+    early_stop_patience: int = 1
+    """Number of *consecutive* qualifying eval rounds required before stopping.
+    ``1`` (default) stops on the first eval round that meets the threshold; raise
+    it to demand the car hold mastery across several evals before advancing. The
+    streak resets at the start of each chunk (so mastering one track does not
+    pre-credit the next) and whenever an eval round fails the threshold."""
 
 
 @dataclass(frozen=True)

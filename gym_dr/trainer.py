@@ -209,9 +209,16 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
             elapsed = result.extra.get("elapsed_seconds", int(time.monotonic() - started_at))
             timesteps = result.extra.get("timesteps_completed")
             time_limit_reached = result.extra.get("time_limit_reached", False)
+            early_stopped = result.extra.get("early_stopped", False)
+            if early_stopped:
+                final_status = "early_stopped"
+            elif time_limit_reached:
+                final_status = "time_limit_reached"
+            else:
+                final_status = "completed"
             _update_status(
                 run_dir,
-                "time_limit_reached" if time_limit_reached else "completed",
+                final_status,
                 {
                     "timesteps_completed": timesteps,
                     "elapsed_seconds": elapsed,

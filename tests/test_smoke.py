@@ -500,6 +500,107 @@ def test_eval_path_plots_logged_as_tb_images(container_mode, monkeypatch):
         assert tag in img_tags, f"missing image tag {tag}; got {sorted(img_tags)}"
 
 
+def test_mastery_met_threshold_logic():
+    """``_mastery_met`` gates purely on the eval off-track fraction vs the
+    configured tolerance, and is a no-op when disabled / no episodes ran."""
+    from gym_dr.trainers.sb3.callbacks import _mastery_met
+
+    class _T:
+        early_stop_enabled = True
+        early_stop_max_offtrack_rate = 0.0
+
+    t = _T()
+    assert _mastery_met(t, 0, 3) is True       # zero off-track -> mastered
+    assert _mastery_met(t, 1, 3) is False      # any off-track fails at rate 0
+    assert _mastery_met(t, 0, 0) is False       # no eval episodes -> not mastered
+    t.early_stop_max_offtrack_rate = 0.5
+    assert _mastery_met(t, 1, 2) is True        # 0.50 <= 0.50
+    assert _mastery_met(t, 2, 3) is False       # 0.66 > 0.50
+    t.early_stop_enabled = False
+    assert _mastery_met(t, 0, 3) is False        # disabled -> never
+
+
+def test_early_stop_ends_single_track_run_when_mastered(container_mode):
+    """With early stop on and a strict rate of 0.0, a track the car never leaves
+    (the default stub reports is_offtrack=False) masters on the first eval round,
+    ending the run before total_timesteps with status 'early_stopped'."""
+    import json
+
+    tmp_path = container_mode
+    exp = _experiment("early_stop_single", tmp_path, total_timesteps=512, eval_freq=64).with_overrides(
+        **{
+            "training.early_stop_enabled": True,
+            "training.early_stop_max_offtrack_rate": 0.0,
+            "training.n_eval_episodes": 2,
+        },
+    )
+    train(exp)
+
+    status = json.loads(
+        (tmp_path / "artifacts" / "early_stop_single" / "training_status.json").read_text()
+    )
+    assert status["status"] == "early_stopped", status
+    assert status["timesteps_completed"] < 512, status
+
+
+def test_early_stop_does_not_fire_when_car_leaves_track(container_mode):
+    """The off-track stub ends every eval episode off the track, so mastery is
+    never reached and the run trains its full budget (status 'completed')."""
+    import json
+
+    tmp_path = container_mode
+    exp = _experiment("no_early_stop", tmp_path, total_timesteps=128, eval_freq=64).with_overrides(
+        env_factory=offtrack_env_factory,
+        **{
+            "training.early_stop_enabled": True,
+            "training.early_stop_max_offtrack_rate": 0.0,
+            "training.n_eval_episodes": 2,
+        },
+    )
+    train(exp)
+
+    status = json.loads(
+        (tmp_path / "artifacts" / "no_early_stop" / "training_status.json").read_text()
+    )
+    assert status["status"] == "completed", status
+    assert status["timesteps_completed"] >= 128, status
+
+
+def test_early_stop_advances_rotation_per_track(container_mode, monkeypatch):
+    """Mastering a track mid-rotation ends that chunk early and the loop advances
+    to the next track. The default stub never leaves the track, so each chunk
+    masters on its first eval yet the rotation still swaps through to world_b."""
+    import json
+
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+
+    calls: list[str] = []
+    orig_set_world = StubDeepRacerEnv.set_world
+
+    def _recording_set_world(self, world_name):
+        calls.append(world_name)
+        return orig_set_world(self, world_name)
+
+    monkeypatch.setattr(StubDeepRacerEnv, "set_world", _recording_set_world)
+
+    exp = _experiment("early_stop_rot", tmp_path, total_timesteps=256, eval_freq=64).with_overrides(
+        worlds=WorldsConfig(names=["world_a", "world_b"], chunk_steps=256, rotations=1),
+        **{
+            "training.early_stop_enabled": True,
+            "training.early_stop_max_offtrack_rate": 0.0,
+        },
+    )
+    train(exp)
+
+    # Chunk 0 (world_a) mastered early but the rotation still advanced to world_b.
+    assert calls == ["world_b"], calls
+    status = json.loads(
+        (tmp_path / "artifacts" / "early_stop_rot" / "training_status.json").read_text()
+    )
+    assert status["status"] == "early_stopped", status
+
+
 def test_multiworld_study_enables_rotation(tmp_path, monkeypatch):
     """HPO host wiring: a multi-world strategy makes ``study`` set GYM_DR_ROTATE
     on the worker env (so each trial rotates training worlds), while a

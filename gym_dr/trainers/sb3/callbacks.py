@@ -85,6 +85,72 @@ def update_training_status(run_dir: Path, status: str, extra: dict[str, Any] | N
     )
 
 
+def _mastery_met(training: Any, n_offtrack: int, n_total: int) -> bool:
+    """Has the car *mastered* the track in this eval round?
+
+    Mastery = the fraction of the round's eval episodes that ended with the car
+    off the track is within ``training.early_stop_max_offtrack_rate`` (``0.0`` =
+    never left the track). Returns ``False`` when early stop is disabled or no
+    eval episodes ran.
+    """
+    if not getattr(training, "early_stop_enabled", False) or n_total <= 0:
+        return False
+    return (n_offtrack / n_total) <= float(training.early_stop_max_offtrack_rate)
+
+
+class _EarlyStopMixin:
+    """Track-mastery early stop, shared by the eval callbacks.
+
+    Both eval callbacks already tally the eval episodes that ended off-track; this
+    turns that tally into a stop decision. When the car holds mastery (see
+    :func:`_mastery_met`) for ``early_stop_patience`` consecutive eval rounds, the
+    host ``_on_step`` returns ``False`` — the same early-exit SB3 honours for
+    ``WallClockLimitCallback`` — which ends the chunk's ``model.learn`` and hands
+    control back to ``Sb3Trainer.fit`` (advancing the rotation, or ending a
+    single-track run). The streak resets per chunk via ``_on_training_start`` so
+    mastering one track never pre-credits the next.
+    """
+
+    def _es_init(self) -> None:
+        self._es_streak = 0
+        self.mastered = False
+        self.early_stops = 0  # non-reset: how many chunks this instance stopped
+
+    def _on_training_start(self) -> None:
+        super()._on_training_start()  # type: ignore[misc]
+        self._es_streak = 0
+        self.mastered = False
+
+    def _apply_early_stop(self, n_offtrack: int, n_total: int) -> bool:
+        """Fold this eval round into the mastery streak; return ``True`` when the
+        chunk should stop now."""
+        training = self._ctx.training  # type: ignore[attr-defined]
+        if not getattr(training, "early_stop_enabled", False):
+            return False
+        if _mastery_met(training, n_offtrack, n_total):
+            self._es_streak += 1
+        else:
+            self._es_streak = 0
+        if self._es_streak < max(1, int(getattr(training, "early_stop_patience", 1))):
+            return False
+        self.mastered = True
+        self.early_stops += 1
+        rate = (n_offtrack / n_total) if n_total else 0.0
+        steps = int(self.num_timesteps)  # type: ignore[attr-defined]
+        print(
+            f"[early-stop] track mastered at {steps} steps "
+            f"(eval off-track rate {rate:.2f} <= "
+            f"{training.early_stop_max_offtrack_rate}); ending chunk",
+            flush=True,
+        )
+        update_training_status(
+            self._ctx.run_dir,  # type: ignore[attr-defined]
+            "early_stopped",
+            {"timesteps_completed": steps, "eval_offtrack_rate": rate},
+        )
+        return True
+
+
 class CtxCheckpointCallback(CheckpointCallback):
     """SB3 CheckpointCallback that routes saves through TrainingContext.
 
@@ -138,7 +204,7 @@ class CtxCheckpointCallback(CheckpointCallback):
             old.with_suffix(".model_metadata.json").unlink(missing_ok=True)
 
 
-class CtxEvalCallback(EvalCallback):
+class CtxEvalCallback(_EarlyStopMixin, EvalCallback):
     """SB3 EvalCallback that calls ctx.report_eval after each evaluation.
 
     `ctx.report_eval` handles MLflow logging and Optuna pruning. We also write
@@ -158,6 +224,7 @@ class CtxEvalCallback(EvalCallback):
         self._ctx = ctx
         self._offtrack_resets = 0
         self._eval_episodes: list[dict] = []
+        self._es_init()
 
     def _log_success_callback(self, locals_: dict, globals_: dict) -> None:
         # Keep SB3's success-rate bookkeeping, then additionally tally eval
@@ -213,10 +280,14 @@ class CtxEvalCallback(EvalCallback):
                         self._ctx.action_space,
                     )
             self._ctx.report_eval(float(self.last_mean_reward), int(self.num_timesteps))
+            # Track-mastery early stop: end the chunk once the car stays on the
+            # track across this eval round (advances the rotation / ends the run).
+            if self._apply_early_stop(self._offtrack_resets, self.n_eval_episodes):
+                return False
         return proceed
 
 
-class MultiWorldEvalCallback(BaseCallback):
+class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
     """Evaluate across an ordered, held-out set of worlds (track generalisation).
 
     Used by ``Sb3Trainer`` when ``ctx.eval_worlds`` is set (e.g. the
@@ -254,6 +325,7 @@ class MultiWorldEvalCallback(BaseCallback):
         self.deterministic = deterministic
         self.last_mean_reward = float("nan")
         self.best_mean_reward = -float("inf")
+        self._es_init()
 
     def _swap(self, vec, world: str) -> None:
         import numpy as np
@@ -320,6 +392,10 @@ class MultiWorldEvalCallback(BaseCallback):
             self._save_best()
 
         self._ctx.report_eval(agg, int(self.num_timesteps))
+        # Track-mastery early stop, measured across all eval worlds this round.
+        total_eps = self.n_eval_episodes * max(1, len(self.eval_worlds))
+        if self._apply_early_stop(sum(offtrack_per_world.values()), total_eps):
+            return False
         return True
 
     def _save_best(self) -> None:
