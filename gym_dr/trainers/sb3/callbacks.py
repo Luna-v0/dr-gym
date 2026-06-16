@@ -89,12 +89,16 @@ class CtxCheckpointCallback(CheckpointCallback):
     """SB3 CheckpointCallback that routes saves through TrainingContext.
 
     Ensures every periodic checkpoint zip gets its `model_metadata.json`
-    sibling, matching what `ctx.save_checkpoint` writes.
+    sibling, matching what `ctx.save_checkpoint` writes. When ``keep_last`` is
+    set, prunes older checkpoints after each save so a long run doesn't fill
+    the disk (``best_model``/``final_model``/``latest_model`` live elsewhere and
+    are never touched).
     """
 
-    def __init__(self, *args: Any, ctx, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, ctx, keep_last: int | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._ctx = ctx
+        self._keep_last = keep_last
 
     def _on_step(self) -> bool:
         if self.save_freq > 0 and (self.n_calls + 1) % self.save_freq == 0:
@@ -104,9 +108,34 @@ class CtxCheckpointCallback(CheckpointCallback):
                 step=step,
                 name_prefix=self.name_prefix,
             )
+            self._prune_old_checkpoints()
             self.n_calls += 1
             return True
-        return super()._on_step()
+        proceed = super()._on_step()
+        self._prune_old_checkpoints()
+        return proceed
+
+    def _prune_old_checkpoints(self) -> None:
+        """Keep only the ``keep_last`` most recent checkpoints (by step number).
+
+        Deletes each pruned ``<prefix>_<step>_steps.zip`` together with its
+        ``.model_metadata.json`` sidecar. No-op when ``keep_last`` is ``None``."""
+        if not self._keep_last or self._keep_last <= 0:
+            return
+        ckpt_dir = Path(self.save_path)
+        zips = list(ckpt_dir.glob(f"{self.name_prefix}_*_steps.zip"))
+        if len(zips) <= self._keep_last:
+            return
+
+        def _step(path: Path) -> int:
+            try:
+                return int(path.stem.split("_")[-2])  # <prefix>_<step>_steps
+            except (ValueError, IndexError):
+                return -1
+
+        for old in sorted(zips, key=_step)[: -self._keep_last]:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".model_metadata.json").unlink(missing_ok=True)
 
 
 class CtxEvalCallback(EvalCallback):

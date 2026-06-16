@@ -219,6 +219,7 @@ class Sb3Trainer:
                 save_path=str(checkpoints_dir),
                 name_prefix=f"{self.name}_checkpoint",
                 ctx=ctx,
+                keep_last=ctx.training.checkpoint_keep_last,
             ),
             StatusJsonCallback(
                 run_dir=run_dir,

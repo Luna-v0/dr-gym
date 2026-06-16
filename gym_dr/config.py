@@ -56,6 +56,15 @@ class TrainingConfig:
     checkpoint gets a sibling ``.model_metadata.json`` so any one of them is
     shippable to the physical car as-is."""
 
+    checkpoint_keep_last: int | None = None
+    """Cap on how many periodic checkpoints to retain on disk. ``None`` (default)
+    keeps every checkpoint — fine for short runs, but a long run at a small
+    ``checkpoint_freq`` can hoard hundreds of multi-hundred-MB zips and fill the
+    disk. Set e.g. ``3`` to keep only the most recent 3 (each older checkpoint +
+    its metadata sidecar is deleted after a new one is written). ``best_model``,
+    ``final_model`` and ``latest_model`` live outside ``checkpoints/`` and are
+    never pruned, so resuming and shipping still work."""
+
     max_train_seconds: int | None = None
     """Optional wall-clock limit. When reached, the chunk saves a final model
     and exits with status ``time_limit_reached``. ``None`` = no cap (train

@@ -67,9 +67,30 @@ def _stringify_params(params: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def log_run_artifacts(run_dir: Path) -> None:
-    """Upload the entire run dir tree to MLflow if a run is active."""
+def log_run_artifacts(
+    run_dir: Path, *, exclude: tuple[str, ...] = ("checkpoints",)
+) -> None:
+    """Upload the run dir tree to MLflow if a run is active.
+
+    By default the ``checkpoints/`` subdir is **excluded**: with a local MLflow
+    file store ``log_artifacts`` *copies* every file into ``mlruns/``, so logging
+    the periodic checkpoints would duplicate them (often tens of GB per run) on
+    the same disk for no benefit — they already persist under
+    ``artifacts/<run>/checkpoints/``. The shippable models (``best_model/``,
+    ``final_model.zip``, ``latest_model.zip``), configs, reward source and
+    TensorBoard events are still logged. Pass ``exclude=()`` to log everything.
+    """
     mlflow = _mlflow()
     if mlflow.active_run() is None:
         return
-    mlflow.log_artifacts(str(run_dir))
+    run_dir = Path(run_dir)
+    if not exclude:
+        mlflow.log_artifacts(str(run_dir))
+        return
+    for entry in sorted(run_dir.iterdir()):
+        if entry.name in exclude:
+            continue
+        if entry.is_dir():
+            mlflow.log_artifacts(str(entry), artifact_path=entry.name)
+        else:
+            mlflow.log_artifact(str(entry))

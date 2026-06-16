@@ -69,7 +69,7 @@ from gym_dr.networks import DeepRacerCNN
 # --------------------------------------------------------------------------- #
 # Knobs — edit these and re-run. Everything else below is wiring.
 # --------------------------------------------------------------------------- #
-NAME = "tt_testing_demo"
+NAME = "tt_testing_demo_I"
 FRAME_STACK = 4  # trial 18's temporal context (DeepRacerEnv emits single frames)
 
 # --- World schedule: train on several tracks, eval generalisation on the ---
@@ -175,12 +175,16 @@ experiment = ExperimentConfig(
     training=TrainingConfig(
         total_timesteps=TOTAL_TIMESTEPS,
         checkpoint_freq=CHUNK_STEPS,
+        # Keep only the most recent few checkpoints. At ~105 MB each (big net) a
+        # 16M-step run at this freq would otherwise hoard ~160 zips (~16 GB) and
+        # fill the disk. best/final/latest_model live outside checkpoints/.
+        checkpoint_keep_last=3,
         # Each eval rolls out n_eval_episodes on EVERY held-out world, so eval
         # cost scales with len(EVAL_WORLDS). 200k keeps the eval count sane over
         # the much larger 16M budget.
         eval_freq=CHUNK_STEPS,
         n_eval_episodes=3,
-        rtf_override=100,  # run the sim at 10x real time
+        rtf_override=160,  # run the sim at 10x real time
         # Render the driven trajectory over a skeleton of each eval track to
         # TensorBoard's Images tab: one overlay per eval world (all 3 episodes,
         # colour + legend) + one chart per episode. See gym_dr/trainers/sb3/plots.py.
