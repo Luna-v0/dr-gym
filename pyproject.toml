@@ -49,6 +49,31 @@ dev = [
   # Python 3.8 — keep the simapp-3.8 host on the 0.1.x line.
   "onnxscript<0.2; python_version<'3.9'",
 ]
+# ONNX -> OpenVINO IR conversion + smoke-test runtimes (see gym_dr/optimize.py and
+# scripts/smoke_test_{1,2}_*.py). These do NOT go in the main env: the device-accurate
+# legacy OpenVINO 2021.4 toolchain pins NumPy 1.19, which conflicts with tensorflow's
+# newer NumPy. So the smoke tests use TWO dedicated venvs, created with uv:
+#
+#   # modern toolchain (ovc / openvino.convert_model) + TF reference + onnxruntime:
+#   uv venv .venv-ov-modern --python 3.8
+#   uv pip install --python .venv-ov-modern/bin/python \
+#       openvino onnxruntime "tensorflow~=2.13.0" tf2onnx pytest
+#
+#   # legacy device toolchain (OpenVINO 2021.4 `mo` + Inference Engine):
+#   uv venv .venv-ov-legacy --python 3.8
+#   uv pip install --python .venv-ov-legacy/bin/python \
+#       "openvino-dev==2021.4.2" "tokenizers==0.10.3" "onnx==1.11.0" "protobuf==3.19.6"
+#
+# Versions resolved on py3.8: openvino 2024.4 / onnxruntime 1.19.2 / tensorflow 2.13.1 /
+# tf2onnx 1.16.1 (modern); openvino 2021.4.2 (legacy). The tokenizers/onnx/protobuf pins
+# work around legacy openvino-dev's outdated transitive deps on py3.8.
+optimize = [
+  "onnx>=1.15",
+  "onnxruntime>=1.16",
+  "openvino>=2024",
+  "tensorflow~=2.13.0",
+  "tf2onnx>=1.16",
+]
 
 [tool.uv.sources]
 # Install deepracer-utils from the project owner's GitHub. Pin a branch so
