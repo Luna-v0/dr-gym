@@ -185,6 +185,8 @@ def main() -> int:
                     help="compare GPU-render+CUDA-NN vs GPU-render+CPU-NN vs pure-CPU (1 worker)")
     ap.add_argument("--gpu-image", default=IMAGE)
     ap.add_argument("--cpu-image", default="my-deepracer-project:cpu")
+    ap.add_argument("--sw-render", action="store_true",
+                    help="force software rendering (LIBGL) so the GPU only does NN — test if instances scale")
     args = ap.parse_args()
     proj = str(Path(os.getenv("PROJECT_DIR", _PROJECT_ROOT)).resolve())
 
@@ -214,11 +216,11 @@ def main() -> int:
         return 0
 
     points = [(args.workers, args.rtf)] if (args.workers and args.rtf) else \
-             [(1, 160), (1, 10), (4, 40), (7, 10)]
+             [(1, 30), (2, 30), (4, 30)]
     results = []
     for w, r in points:
-        print(f"[bench] workers={w} rtf={r} seconds={args.seconds} ...", flush=True)
-        res = _run_point(w, r, args.seconds, proj)
+        print(f"[bench] workers={w} rtf={r} sw_render={args.sw_render} seconds={args.seconds} ...", flush=True)
+        res = _run_point(w, r, args.seconds, proj, sw_render=args.sw_render)
         print(f"[bench] {res}", flush=True)
         results.append(res)
 

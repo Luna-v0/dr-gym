@@ -332,6 +332,14 @@ class ExperimentConfig:
     training rewards can still be ranked fairly. Doesn't affect what the policy
     optimizes (that's ``reward``)."""
 
+    cost: Callable[[dict], float] | None = None
+    """Optional CMDP **cost** — graded *risk* of nearing a bad state
+    (``gym_dr/costs.py``), logged every episode as ``dr/ep_mean_cost`` /
+    ``dr/ep_max_cost`` so even *unconstrained* PPO characterises the cost level
+    (to pick a constraint budget empirically). ``None`` ⇒ monitored with
+    ``cost_near_edge``. A constrained (safe-RL) trainer keeps E[discounted cost]
+    ≤ a budget."""
+
     action_space: ActionSpaceConfig = field(default_factory=ContinuousActionSpaceConfig)
     """Continuous bounds (steering and speed ranges) or a discrete action
     list. Controls both the env's gym action space and what gets written to
@@ -440,6 +448,7 @@ class ExperimentConfig:
             "trainer": _describe(self.trainer),
             "reward": _describe_callable(self.reward),
             "eval_reward": _describe_callable(self.eval_reward),
+            "cost": _describe_callable(self.cost) if self.cost is not None else None,
             "action_space": {
                 **dataclasses.asdict(self.action_space),
                 "action_space_type": self.action_space.action_space_type,

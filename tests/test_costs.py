@@ -60,3 +60,27 @@ def test_composite_steering_jerk_needs_two_steps():
 
 def test_cost_variants_are_graded_risk():
     assert set(COST_VARIANTS) == {"near_edge", "near_collision"}
+
+
+def test_episode_metrics_logs_cost():
+    from gym_dr.metrics import _EpisodeMetrics
+    m = _EpisodeMetrics()
+    m.cost_fn = cost_near_edge
+    edge = {"track_width": 1.0, "distance_from_center": 0.5, "speed": 1.0,
+            "steering_angle": 0.0, "progress": 10, "is_offtrack": False,
+            "all_wheels_on_track": True}
+    center = {**edge, "distance_from_center": 0.0, "progress": 20}
+    m.record_step(edge, reward=1.0)    # at edge -> cost 1.0
+    m.record_step(center, reward=1.0)  # centre -> cost 0.0
+    s = m.summary()
+    assert s["dr/ep_mean_cost"] == 0.5
+    assert s["dr/ep_max_cost"] == 1.0
+
+
+def test_config_cost_default_none_and_serializes():
+    from gym_dr.config import ExperimentConfig
+    e = ExperimentConfig(name="t")
+    assert e.cost is None
+    assert e.to_dict()["cost"] is None
+    e2 = ExperimentConfig(name="t", cost=cost_near_edge)
+    assert "cost_near_edge" in e2.to_dict()["cost"]

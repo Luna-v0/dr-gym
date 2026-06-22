@@ -51,6 +51,8 @@ class _EpisodeMetrics:
     steps: int = 0
     reward_sum: float = 0.0
     eval_reward_sum: float = 0.0
+    cost_sum: float = 0.0
+    cost_max: float = 0.0
     offtrack_count: int = 0
     crash_count: int = 0
     max_progress: float = 0.0
@@ -63,6 +65,10 @@ class _EpisodeMetrics:
     # ``dr/ep_ended_offtrack``.
     last_offtrack: bool = False
     use_eval_reward: bool = False
+    cost_fn: Optional[Callable[[dict], float]] = None
+    """CMDP cost (graded risk), set by ``install_metrics`` (default
+    ``cost_near_edge``) so every run logs ``dr/ep_*cost`` for empirical budgeting.
+    Mode-level — NOT reset per episode."""
 
     # --- Eval trajectory capture (optional; TrainingConfig.eval_path_plots) ---
     # When ``capture_path`` is on, each step appends the car's (x, y) so the eval
@@ -91,6 +97,8 @@ class _EpisodeMetrics:
         self.steps = 0
         self.reward_sum = 0.0
         self.eval_reward_sum = 0.0
+        self.cost_sum = 0.0
+        self.cost_max = 0.0
         self.offtrack_count = 0
         self.crash_count = 0
         self.max_progress = 0.0
@@ -126,6 +134,14 @@ class _EpisodeMetrics:
             self.max_progress = progress
         self.speed_sum += float(params.get("speed", 0.0))
         self.steering_abs_sum += abs(float(params.get("steering_angle", 0.0)))
+        if self.cost_fn is not None:
+            try:
+                c = float(self.cost_fn(params))
+            except Exception:  # noqa: BLE001 — a buggy cost must not kill training
+                c = 0.0
+            self.cost_sum += c
+            if c > self.cost_max:
+                self.cost_max = c
 
         if self.capture_path:
             x = params.get("x")
@@ -215,6 +231,10 @@ class _EpisodeMetrics:
             "dr/ep_completed_clean": (
                 1.0 if (self.max_progress >= 99.999 and self.offtrack_count == 0) else 0.0
             ),
+            # CMDP cost (graded risk of nearing a bad state) — logged even for
+            # unconstrained PPO so the constraint budget can be set empirically.
+            "dr/ep_mean_cost": self.cost_sum / n,
+            "dr/ep_max_cost": self.cost_max,
         }
 
 
@@ -320,6 +340,15 @@ def install_metrics(
     simtrace-equivalent; see ``docs/trace-contract.md``).
     """
     state = _EpisodeMetrics()
+
+    # Always log a cost signal so even unconstrained runs characterise it (used to
+    # pick the safe-RL budget empirically). Uses experiment.cost or cost_near_edge.
+    cost_fn = getattr(experiment, "cost", None)
+    if cost_fn is None:
+        from gym_dr.costs import cost_near_edge
+
+        cost_fn = cost_near_edge
+    state.cost_fn = cost_fn
 
     trace_cfg = getattr(experiment, "trace", None)
     if run_dir is not None and trace_cfg is not None and getattr(trace_cfg, "enabled", False):
