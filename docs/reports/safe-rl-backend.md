@@ -48,6 +48,20 @@ control, the hybrid is the better fit.
 - `SafeSb3Trainer` (cost-critic head + separate optimizer + PID dual): **moderate**, but reuses all our
   callbacks/metrics/curriculum; the dual-update + separate optimizer is the only genuinely new code.
 
+## Other libraries surveyed (2025–26)
+None displace the recommendation, but for completeness:
+- **FSRL** (online, Tianshou) + **OSRL** (offline) — actively maintained, lighter than OmniSafe; the
+  runner-up if you'd rather *adopt* than build the SB3 Lagrangian.
+- **SafePO** (PKU) — 16 algorithms, benchmark/pedagogical.
+- **safe-control-gym** (utiasDSL) — safe learning-based *control* + RL (more control-theoretic).
+- **Bullet-Safety-Gym** — constrained-RL envs (PyBullet), supports CPO.
+- **SafeRL-Kit** (5 methods) and **chauncygu/Safe-RL-Baselines** (curated impls) — reference.
+- **HASARD** — a **vision-based** safe-RL benchmark for embodied agents; closer to camera-based DeepRacer
+  than Safety-Gymnasium's point-mass tasks, so a useful *second* validation target.
+
+Net: the hybrid stands. If "build an SB3 Lagrangian" is unwanted, **FSRL** is the lightest adopt-alternative;
+validate on **Safety-Gymnasium** (+ optionally **HASARD** for vision) before DeepRacer.
+
 ## Sources
 - [OmniSafe (JMLR 2024)](https://www.jmlr.org/papers/v25/23-0681.html) · [arXiv](https://arxiv.org/abs/2305.09304) · [GitHub/docs](https://github.com/PKU-Alignment/omnisafe) · [features](https://www.omnisafe.ai/en/latest/start/features.html)
 - [FSRL — fast safe RL (PyTorch/Tianshou)](https://github.com/liuzuxin/FSRL)

@@ -178,6 +178,120 @@ class TrainingContext:
 
                 raise optuna.TrialPruned()
 
+    # ----- framework-agnostic services for custom trainers ------------------ #
+    # These let a non-SB3 algorithm reuse all the pipeline plumbing (logging,
+    # episode metrics, world-swap, the held-out eval protocol) without importing
+    # TensorBoard/MLflow/the metadata writer. Call them at rollout/episode/eval
+    # boundaries — none belong in the per-env-step hot loop, so they add no
+    # measurable training overhead.
+
+    def set_status(self, status: str, extra: dict | None = None) -> None:
+        """Write ``training_status.json``. The orchestrator sets the initial and
+        terminal statuses; a long custom loop may call this periodically with
+        progress (e.g. ``{"timesteps_completed": n}``)."""
+        from gym_dr.trainers.sb3.callbacks import update_training_status
+
+        update_training_status(self.run_dir, status, extra)
+
+    def tb_writer(self):
+        """Lazily-created TensorBoard ``SummaryWriter`` under
+        ``run_dir/tensorboard/`` (the same place SB3 writes), cached across calls."""
+        w = getattr(self, "_tb_writer", None)
+        if w is None:
+            from torch.utils.tensorboard import SummaryWriter
+
+            w = SummaryWriter(log_dir=str(self.run_dir / "tensorboard" / f"{self.name_prefix}_1"))
+            object.__setattr__(self, "_tb_writer", w)
+        return w
+
+    def log_metrics(self, metrics: "dict[str, float]", step: int) -> None:
+        """Log scalars to **both TensorBoard and MLflow** — the single call a
+        custom trainer needs for loss curves, ``dr/ep_*`` episode metrics, and
+        eval. Cheap, but call it at rollout/episode/eval boundaries, not per
+        env-step."""
+        try:
+            w = self.tb_writer()
+            for k, v in metrics.items():
+                try:
+                    w.add_scalar(k, float(v), step)
+                except (TypeError, ValueError):
+                    continue
+            w.flush()
+        except Exception:  # noqa: BLE001 — TB must never break training
+            pass
+        for k, v in metrics.items():
+            self.log_metric(k, v, step)
+
+    def record_episode(self, info: Any, step: int):
+        """Drain a finished episode's ``dr_episode`` summary from ``info`` (present
+        when the env was built through the orchestrator's metrics wrapper) to
+        TB+MLflow; returns it, or ``None`` if absent."""
+        summary = info.get("dr_episode") if isinstance(info, dict) else None
+        if not summary:
+            return None
+        self.log_metrics(summary, step)
+        return summary
+
+    def swap_world(self, env: Any, world: str) -> None:
+        """Hot-swap the env's Gazebo track to ``world`` and reset. Works for a raw
+        gymnasium env (forwarded through wrappers) or an SB3 ``VecEnv``."""
+        if hasattr(env, "env_method"):  # SB3 VecEnv
+            env.env_method("set_world", world)
+            env.reset()
+            return
+        setter = getattr(env, "set_world", None) or getattr(
+            getattr(env, "unwrapped", env), "set_world", None
+        )
+        if setter is None:
+            raise AttributeError("env has no set_world(); expected a DeepRacerEnv")
+        setter(world)
+        env.reset()
+
+    def evaluate(self, predict_fn: Callable[[Any], Any], env: Any, *,
+                 n_episodes: int = 3, step: int = 0) -> "dict[str, float]":
+        """Run the project's standard **held-out evaluation** for a raw gymnasium
+        env + your ``predict_fn(obs) -> action``.
+
+        Swaps to each world in :attr:`eval_worlds` (or the current world if
+        unset), runs ``n_episodes`` each, aggregates the success-criterion metrics
+        from the env's ``dr_episode`` summaries (clean-completion rate, completion
+        rate, progress, eval reward, off-track rate), logs per-world + aggregate to
+        TB+MLflow, and calls :meth:`report_eval` (MLflow + Optuna). Returns the
+        aggregate. Flips ``metrics_state.use_eval_reward`` around the eval. For an
+        SB3/VecEnv trainer, use SB3's own eval instead.
+        """
+        worlds = self.eval_worlds or [None]
+        state = self.metrics_state
+        if state is not None:
+            state.use_eval_reward = True
+        per_world: "dict[str, dict]" = {}
+        try:
+            for world in worlds:
+                if world is not None:
+                    self.swap_world(env, world)
+                summaries = []
+                while len(summaries) < n_episodes:
+                    obs, _info = env.reset()
+                    done, info = False, {}
+                    while not done:
+                        obs, _r, term, trunc, info = env.step(predict_fn(obs))
+                        done = bool(term or trunc)
+                    if isinstance(info, dict) and info.get("dr_episode"):
+                        summaries.append(info["dr_episode"])
+                per_world[world or "current"] = _agg_eval(summaries)
+            train_world = getattr(state, "world_name", None)
+            if worlds != [None] and train_world:
+                self.swap_world(env, train_world)
+        finally:
+            if state is not None:
+                state.use_eval_reward = False
+        agg = _agg_over_worlds(per_world)
+        flat = {f"eval/{w}_{k}": v for w, m in per_world.items() for k, v in m.items()}
+        flat.update({f"eval/{k}": v for k, v in agg.items()})
+        self.log_metrics(flat, step)
+        self.report_eval(agg.get("mean_reward", float("nan")), step)
+        return agg
+
 
 @runtime_checkable
 class Trainer(Protocol):
@@ -200,5 +314,36 @@ class Trainer(Protocol):
         - call ``ctx.save_model(fn, name="latest_model")`` in a ``finally``
           so resume targets exist even on crash,
         - call ``ctx.save_model(fn, name="final_model")`` on clean exit.
+
+        Or simply reuse the shared services on ``ctx``: ``log_metrics`` (TB+MLflow),
+        ``record_episode`` (drains ``dr/ep_*``), ``swap_world`` (curriculum), and
+        ``evaluate`` (the held-out clean-completion protocol) — see
+        ``docs/trainer-contract.md`` and ``experiments/custom_trainer_example.py``.
         """
         ...
+
+
+def _agg_eval(summaries: "list[dict]") -> "dict[str, float]":
+    """Aggregate per-episode ``dr_episode`` summaries into the success-criterion
+    eval metrics (used by :meth:`TrainingContext.evaluate`)."""
+    n = max(len(summaries), 1)
+
+    def mean(key: str) -> float:
+        return sum(float(s.get(key, 0.0)) for s in summaries) / n
+
+    return {
+        "clean_completion_rate": mean("dr/ep_completed_clean"),
+        "completion_rate": mean("dr/ep_completed"),
+        "mean_progress": mean("dr/ep_max_progress"),
+        "mean_reward": mean("dr/ep_eval_reward"),
+        "offtrack_rate": mean("dr/ep_offtrack_rate"),
+    }
+
+
+def _agg_over_worlds(per_world: "dict[str, dict]") -> "dict[str, float]":
+    """Mean of each metric across the held-out worlds."""
+    if not per_world:
+        return {}
+    keys = list(next(iter(per_world.values())).keys())
+    n = len(per_world)
+    return {k: sum(w[k] for w in per_world.values()) / n for k in keys}

@@ -15,6 +15,29 @@ W-dr, W-perception, W-tooling, W-dash, W-throughput, W-deploy, W-extensibility, 
 
 ---
 
+## Status & next-actions (updated 2026-06-22)
+**Shipped on `main`:** P1 clean-completion eval · P3 action-normalization · D5 `StochasticCurriculum` ·
+safe-RL graded *risk* costs (`gym_dr/costs.py`) · static DR noise wrappers · speed-coloured eval charts ·
+**framework-agnostic trainer contract** (author your own algorithm — `docs/trainer-contract.md`) · env
+baselines + contract tests · ONNX→IR deploy + on-car engine/model-size studies · throughput/device-sweep
+tooling. Reports in `docs/reports/`.
+
+**Key empirical findings:** RTF caps ~4.5–5× (`rtf_override` ignored) and separate-container parallelism
+doesn't scale; training is **inference-device-bound, not render-bound** (CUDA ≈5× CPU; software-render =
+same speed ⇒ GPU passthrough for rendering is unnecessary); the **Pi runs even a 24 M-param net in ~35 ms,
+<200 MB** — memory is not the constraint, latency is; **onnxruntime** beats OpenVINO-ARM on the Pi.
+
+**Running:** D3 held-out validation (GPU/CUDA, ~20 h).
+
+**Queue (no input needed):** build **ADR** (auto DR — `docs/reports/domain-randomization.md`); the
+**deepracer-env edits** (`sim_time` exposure, random-start/direction, episode-lifecycle config — signed
+off); **SB3 PID-Lagrangian trainer** (after D9, against the new contract); **deepracer-utils** compat +
+chart port; TFLite/ExecuTorch + **int8 quant** on the Pi; **software-render multi-instance + N-cars**
+throughput sweeps (need a free GPU); **perception net** + asymmetric critic (W-perception); the
+**`deepracer-deploy`** repo (on-car node + ServoCtrlMsg rescale + watchdog, ADR-0001).
+
+**Open decision:** **D9** — safe-RL backend (hybrid vs full OmniSafe), see `docs/questions-for-maintainer.md`.
+
 ## Active questions
 
 ### Q1 🟡 `[DISS]` Why doesn't a PPO policy generalize across tracks? (highest priority)

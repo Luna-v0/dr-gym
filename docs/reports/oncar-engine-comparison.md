@@ -37,6 +37,32 @@ Keep a side-by-side (latency / memory / thermals / action-accuracy) as both come
 - Context: at ~12 ms we're already well under the 15 Hz budget, so quantization is **headroom / thermals /
   battery**, not a necessity — but worth quantifying, especially post-cooling for sustained runs.
 
+## Model-size / memory "edge" (Pi 4, onnxruntime, random-weight nets)
+How big a model the Pi can run vs the control budget (15 Hz = 66.7 ms/step) and its RAM cost:
+
+| model | params | mean ms | p95 ms | model RSS | proc RSS | temp |
+|---|--:|--:|--:|--:|--:|--:|
+| tiny | 1.0 M | 3.0 | 3.1 | 15 MB | 63 MB | 56 °C |
+| small (~p1p3 deploy) | 4.0 M | 8.1 | 9.0 | 11 MB | 74 MB | 57 °C |
+| xl (~trial_18 conv) | 6.0 M | 10.2 | 10.3 | 21 MB | 96 MB | 58 °C |
+| medium | 7.9 M | 12.1 | 12.2 | 16 MB | 112 MB | 59 °C |
+| large | 16.0 M | 21.4 | 21.8 | 59 MB | 171 MB | 58 °C |
+| xxl | 24.1 M | 34.6 | 34.9 | 66 MB | 178 MB | 61 °C |
+
+**The Pi is not the constraint.** At 15 Hz you have ~67 ms/inference; even the **24 M-param** net runs in
+**~35 ms (half the budget)** using **<200 MB of ~3.4 GB** RAM. So:
+- **Memory is a non-issue** — GBs of headroom; the model itself is ≤66 MB resident.
+- **Latency is the real limit.** Comfortable to ~24 M params at 15 Hz; extrapolating (~1.4 ms/M for these
+  MLP-heavy nets) the 67 ms ceiling sits near ~45 M params (conv-heavy nets cost more/param, so lower).
+  At **30 Hz** (33 ms) the cap is ~xl/medium (6–8 M); the current deploy net (`small`, 4 M) is **8 ms** —
+  huge headroom either way.
+- Latency tracks **compute, not param count** (xl's 6 M @10.2 ms vs medium's 7.9 M @12 ms — xl has deeper
+  conv). Budget by FLOPs/conv depth, not just params.
+- Thermals stayed 56–61 °C over the short bench; **re-check under sustained driving + post-cooling-upgrade**.
+
+**Takeaway:** you can use a substantially bigger network than trial_18 on the custom car without missing the
+control deadline — the edge is ~tens of ms of latency, not memory.
+
 ## Next
 1. int8-quantize `agent.onnx`, push, re-bench on the Pi (latency + accuracy vs fp32).
 2. TFLite/ExecuTorch model conversions for a complete 4-way table.
