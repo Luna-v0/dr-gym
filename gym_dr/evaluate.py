@@ -260,6 +260,88 @@ def run_evaluation(
     return summaries
 
 
+def evaluate_on_tracks(
+    experiment: ExperimentConfig,
+    model_path: Path,
+    tracks: list[str],
+    *,
+    n_episodes: int = 5,
+    frame_stack: int | None = None,
+    run_config_path: Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """Score a trained model on each of ``tracks`` OUT OF THE TRAINING LOOP.
+
+    For each track: hot-swap the env to it, run ``n_episodes`` with
+    ``deterministic=True``, and aggregate the success-criterion metrics from the
+    per-episode ``dr_episode`` summaries:
+
+      - ``clean_completion_rate`` — fraction of episodes that finished the lap
+        with zero off-track steps (the headline);
+      - ``completion_rate`` — finished the lap (off-track allowed);
+      - ``mean_max_progress`` / ``mean_speed`` / ``mean_offtrack_rate``.
+
+    Used by ``scripts/eval_physical_tracks.py`` to report sim-to-real transfer on
+    the maintainer's physical tracks (``reInvent2019_track``, ``Oval_track``),
+    which are reserved out of training/eval (see ``docs/eval-protocol.md``).
+    """
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+
+    from gym_dr.export import load_sb3_zip
+    from gym_dr.metrics import install_metrics
+
+    model_path = Path(model_path).resolve()
+    if not model_path.exists():
+        raise FileNotFoundError(model_path)
+    if frame_stack is None:
+        frame_stack = _frame_stack_from_run_config(model_path, run_config_path)
+
+    wrapped_experiment, env_wrapper, _state = install_metrics(experiment)
+    base_env = env_wrapper(wrapped_experiment.env_factory(wrapped_experiment))
+    venv = DummyVecEnv([lambda: base_env])
+    if frame_stack > 1:
+        venv = VecFrameStack(venv, n_stack=frame_stack)
+    model = load_sb3_zip(model_path)
+
+    def _mean(summaries: list[dict], key: str) -> float:
+        vals = [float(s.get(key, 0.0)) for s in summaries]
+        return sum(vals) / max(1, len(vals))
+
+    results: dict[str, dict[str, float]] = {}
+    try:
+        for track in tracks:
+            try:
+                venv.env_method("set_world", track)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("could not set_world(%s): %s — skipping", track, exc)
+                continue
+            obs = venv.reset()
+            summaries: list[dict] = []
+            while len(summaries) < n_episodes:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, _r, dones, infos = venv.step(action)
+                if bool(dones[0]):
+                    summaries.append(infos[0].get("dr_episode", {}) or {})
+            results[track] = {
+                "clean_completion_rate": _mean(summaries, "dr/ep_completed_clean"),
+                "completion_rate": _mean(summaries, "dr/ep_completed"),
+                "mean_max_progress": _mean(summaries, "dr/ep_max_progress"),
+                "mean_speed": _mean(summaries, "dr/ep_mean_speed"),
+                "mean_offtrack_rate": _mean(summaries, "dr/ep_offtrack_rate"),
+                "n_episodes": float(len(summaries)),
+            }
+            r = results[track]
+            LOG.info(
+                "[%s] clean_completion=%.2f  completion=%.2f  progress=%.1f%%  "
+                "speed=%.2f  offtrack_rate=%.2f  (n=%d)",
+                track, r["clean_completion_rate"], r["completion_rate"],
+                r["mean_max_progress"], r["mean_speed"], r["mean_offtrack_rate"],
+                int(r["n_episodes"]),
+            )
+    finally:
+        venv.close()
+    return results
+
+
 # --------------------------------------------------------------------------- #
 # Internals
 # --------------------------------------------------------------------------- #

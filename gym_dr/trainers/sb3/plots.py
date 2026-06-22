@@ -154,10 +154,18 @@ def render_episode(world: str, timestep: int, idx: int, ep: Dict[str, Any]) -> A
 
     fig, ax = plt.subplots(figsize=(5.0, 5.0))
     _draw_skeleton(ax, ep, world)
-    ax.plot(ep.get("x", []), ep.get("y", []), color="C0", lw=1.6, zorder=2)
-    if ep.get("x"):
-        ax.plot(ep["x"][0], ep["y"][0], "o", color="green", ms=6, zorder=3, label="start")
-        ax.plot(ep["x"][-1], ep["y"][-1], "x", color="red", ms=8, mew=2, zorder=3, label="stop")
+    xs, ys = ep.get("x", []), ep.get("y", [])
+    speeds = ep.get("speed") or []
+    if xs and len(speeds) == len(xs):
+        # Speed-coloured trajectory + colourbar (deepracer-utils-style: shows
+        # *where* the car is fast/slow along the lap, not just the path shape).
+        sc = ax.scatter(xs, ys, c=speeds, cmap="turbo", s=7, zorder=2)
+        fig.colorbar(sc, ax=ax, label="speed (m/s)", fraction=0.046, pad=0.04)
+    else:
+        ax.plot(xs, ys, color="C0", lw=1.6, zorder=2)
+    if xs:
+        ax.plot(xs[0], ys[0], "o", color="green", ms=6, zorder=3, label="start")
+        ax.plot(xs[-1], ys[-1], "x", color="red", ms=8, mew=2, zorder=3, label="stop")
     status = ep.get("status", "?")
     progress = ep.get("progress", 0.0)
     ax.set_title(f"{world} ep{idx} — {status} {progress:.0f}%  @ {timestep:,} steps")

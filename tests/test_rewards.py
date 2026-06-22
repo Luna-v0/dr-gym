@@ -132,12 +132,13 @@ def test_progress_safe_not_in_training_variants():
     assert progress_safe not in REWARD_VARIANTS.values()
 
 
-def test_progress_safe_is_default_eval_reward():
-    """ExperimentConfig.eval_reward defaults to progress_safe so trials
-    sweeping different training rewards rank on the same axis."""
+def test_clean_completion_is_default_eval_reward():
+    """ExperimentConfig.eval_reward defaults to clean_completion (the
+    success-criterion yardstick). progress_safe stays importable for back-compat."""
     from gym_dr.config import ExperimentConfig
+    from gym_dr.rewards import clean_completion
     exp = ExperimentConfig(name="t")
-    assert exp.eval_reward is progress_safe
+    assert exp.eval_reward is clean_completion
 
 
 def test_object_avoidance_aware_crash_penalty():

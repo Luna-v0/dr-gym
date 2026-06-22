@@ -319,6 +319,50 @@ def progress_safe(params: dict) -> float:
     return float((progress / steps) * 100.0 + speed ** 2)
 
 
+# Per-step penalty (eval-only) for an off-track step in ``clean_completion``.
+# Larger than progress_safe's -1.0 so that ANY off-track excursion clearly sinks
+# the episode score below a clean lap — matching the maintainer's success
+# criterion that the car must finish *without leaving the track*.
+CLEAN_OFFTRACK_PENALTY = -10.0
+
+# One-off bonus (eval-only) added on the step the lap completes (progress ~100),
+# so a finished lap dominates an unfinished one of the same pace.
+COMPLETION_BONUS = 100.0
+
+
+def clean_completion(params: dict) -> float:
+    """Eval-only reward aligned with the success criterion: *finish every track
+    without leaving it, at a reasonable (non-minimum) speed.*
+
+    On-track step: lap pace ``(progress/steps) * 100`` (cannot be gamed by
+    crawling — slower ⇒ more steps ⇒ smaller term) **plus the step ``speed``
+    linearly** (so faster-but-clean ranks above slow-but-clean, *without* the
+    ``speed²`` domination that let :func:`progress_safe` reward reckless speed).
+    On the completing step (``progress >= 100``) a one-off
+    :data:`COMPLETION_BONUS`. Any off-track step returns
+    :data:`CLEAN_OFFTRACK_PENALTY` — large enough that a lap with *any* excursion
+    scores below a clean one.
+
+    Eval-only (NOT in ``REWARD_VARIANTS``), like :func:`progress_safe`. The
+    authoritative generalization measure is the ``dr/ep_completed_clean`` episode
+    metric surfaced per held-out world as ``eval/<world>_clean_completion_rate``;
+    this reward is the per-step proxy that drives ``best_model`` selection toward
+    clean, reasonably-fast laps.
+    """
+    offtrack = (
+        (not params.get("all_wheels_on_track", True))
+        or params.get("is_offtrack", False)
+    )
+    if offtrack:
+        return CLEAN_OFFTRACK_PENALTY
+    progress = float(params.get("progress", 0.0))
+    steps = max(int(params.get("steps", 1) or 1), 1)
+    speed = float(params.get("speed", 0.0))
+    pace = (progress / steps) * 100.0
+    bonus = COMPLETION_BONUS if progress >= 99.999 else 0.0
+    return float(pace + speed + bonus)
+
+
 # --------------------------------------------------------------------------- #
 # Registry — for HPO sweep over reward variants.
 # --------------------------------------------------------------------------- #

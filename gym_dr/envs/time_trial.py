@@ -59,7 +59,13 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     from deepracer_env.environments.deepracer_env import DeepRacerEnv
 
     from gym_dr.action_space import ContinuousActionSpaceConfig
-    from gym_dr.envs.wrappers import ActionBounds, GrayscaleObs
+    from gym_dr.envs.wrappers import (
+        ActionBounds,
+        ActuatorNoise,
+        GrayscaleObs,
+        NormalizeActions,
+        ObservationNoise,
+    )
 
     oa_cfg = experiment.object_avoidance
     upstream_oa = (
@@ -76,6 +82,7 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     # ``speed_low`` only flows into ``model_metadata.json`` otherwise. The
     # wrapper makes the bound real for both PPO's action distribution and the
     # commanded action that reaches Gazebo.
+    dr = getattr(experiment, "domain_randomization", None)
     cfg = experiment.action_space
     if isinstance(cfg, ContinuousActionSpaceConfig):
         env = ActionBounds(
@@ -85,4 +92,35 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
             speed_low=cfg.speed_low,
             speed_high=cfg.speed_high,
         )
-    return GrayscaleObs(env)
+        # Actuator-noise DR (engineering units) sits between ActionBounds (inner
+        # clip, re-bounds the noisy command) and NormalizeActions (outer
+        # [-1,1]->eng map applied first). See docs/reports/domain-randomization.md.
+        if dr is not None and dr.has_action_noise:
+            env = ActuatorNoise(
+                env, steering_std=dr.actuator_steering_std,
+                speed_std=dr.actuator_speed_std, seed=dr.seed,
+            )
+        # Optionally let the policy act in a symmetric [-1, 1] space (mapped back
+        # to engineering units for the env). Keeps the ONNX/on-car interface in
+        # engineering units while giving PPO's unit Gaussian comparable
+        # exploration on every action dim. See docs/reports/q1-generalization.md.
+        if getattr(cfg, "normalize_actions", False):
+            env = NormalizeActions(env)
+    env = GrayscaleObs(env)
+    # Observation-noise DR perturbs the grayscale frames the policy sees, so it
+    # wraps OUTSIDE GrayscaleObs.
+    if dr is not None and dr.has_obs_noise:
+        env = ObservationNoise(
+            env, gaussian_std=dr.obs_gaussian_std,
+            brightness_jitter=dr.obs_brightness_jitter, seed=dr.seed,
+        )
+    if dr is not None and (dr.random_start or dr.random_direction):
+        import warnings
+
+        warnings.warn(
+            "domain_randomization.random_start/random_direction need a "
+            "deepracer-env reset change (see docs/reports/domain-randomization.md) "
+            "— ignored until that lands.",
+            stacklevel=2,
+        )
+    return env

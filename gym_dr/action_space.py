@@ -56,6 +56,17 @@ class ContinuousActionSpaceConfig:
     """Maximum speed, m/s. Higher = harder to control, especially on tight
     tracks."""
 
+    normalize_actions: bool = True
+    """When True (the **default**), the env factory wraps the env so the *policy*
+    sees a symmetric ``[-1, 1]`` action space (mapped back to these
+    engineering-unit bounds for the sim). PPO's unit-init Gaussian then explores
+    steering and speed comparably; the raw ``Box([-30,30]×[low,high])`` otherwise
+    gives steering only ~±1° of exploration — the trial_18 failure root cause
+    (see ``docs/reports/q1-generalization.md``). The sim still receives
+    engineering units, but note the **exported ONNX now outputs ``[-1, 1]``**, so
+    the on-car node must rescale it (see ``docs/physical-car-integration-notes.md``).
+    Set False to reproduce the old raw-action behaviour."""
+
     sensor: list[str] = field(default_factory=lambda: ["FRONT_FACING_CAMERA"])
     """Active sensors. Each becomes a key in the observation dict. Valid
     values (from upstream): ``CAMERA`` / ``FRONT_FACING_CAMERA``,

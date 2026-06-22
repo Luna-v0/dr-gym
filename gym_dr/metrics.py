@@ -73,6 +73,7 @@ class _EpisodeMetrics:
     capture_path: bool = False
     path_x: list = field(default_factory=list)
     path_y: list = field(default_factory=list)
+    path_speed: list = field(default_factory=list)
     wp_x: list = field(default_factory=list)
     wp_y: list = field(default_factory=list)
     track_width: float = 0.0
@@ -98,6 +99,7 @@ class _EpisodeMetrics:
         self.last_offtrack = False
         self.path_x.clear()
         self.path_y.clear()
+        self.path_speed.clear()
         self.wp_x.clear()
         self.wp_y.clear()
         self.track_width = 0.0
@@ -131,6 +133,7 @@ class _EpisodeMetrics:
             if x is not None and y is not None:
                 self.path_x.append(float(x))
                 self.path_y.append(float(y))
+                self.path_speed.append(float(params.get("speed", 0.0)))
             # Grab the skeleton once per episode — waypoints/width are constant
             # per world, so the first step that carries them is enough.
             if not self.wp_x:
@@ -181,6 +184,7 @@ class _EpisodeMetrics:
         return {
             "x": list(self.path_x),
             "y": list(self.path_y),
+            "speed": list(self.path_speed),
             "wp_x": list(self.wp_x),
             "wp_y": list(self.wp_y),
             "track_width": self.track_width,
@@ -204,6 +208,13 @@ class _EpisodeMetrics:
             # reset), 0.0 otherwise (lap completion / time truncation). Averaged
             # per rollout in training; summed per eval into eval/*_offtrack_resets.
             "dr/ep_ended_offtrack": 1.0 if self.last_offtrack else 0.0,
+            # Success-criterion metrics: did the car reach the lap end, and did
+            # it do so without ever leaving the track? Averaged per rollout in
+            # training; turned into eval/<world>_(clean_)completion_rate in eval.
+            "dr/ep_completed": 1.0 if self.max_progress >= 99.999 else 0.0,
+            "dr/ep_completed_clean": (
+                1.0 if (self.max_progress >= 99.999 and self.offtrack_count == 0) else 0.0
+            ),
         }
 
 

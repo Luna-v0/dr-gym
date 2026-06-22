@@ -132,3 +132,72 @@ class OrderedSplit(WorldStrategy):
 
     def evaluation_worlds(self) -> List[str]:
         return list(self.eval_worlds)
+
+
+@dataclass(frozen=True)
+class StochasticCurriculum(WorldStrategy):
+    """Spaced-repetition curriculum: sample each chunk's track from an expanding
+    window, favouring newer tracks but **always** keeping a chance of revisiting
+    older ones — to fight the catastrophic forgetting a strict sequential
+    curriculum suffers (see ``docs/open-questions.md`` Q7).
+
+    The window of "unlocked" tracks grows by one every ``unlock_every`` chunks
+    (track 0 from the start; track 1 after ``unlock_every`` chunks; ...). Within
+    the unlocked window, track *j* is sampled with weight ``recency_weight ** j``
+    (``recency_weight > 1`` ⇒ the most recently unlocked is heaviest), so older
+    tracks keep a small, non-zero probability — exactly the "always a little bit
+    of training on an older track" behaviour requested. Held-out evaluation uses
+    ``eval_worlds`` (like :class:`OrderedSplit`).
+
+    The chunk sequence is generated **deterministically** from ``seed`` (a fresh
+    ``random.Random(seed)`` each call) so the host and in-container trainer agree
+    on the same plan.
+
+    NOTE: unlocking here is *schedule-based* (every ``unlock_every`` chunks) — an
+    approximation of true **mastery-gated** progression (advance only once the
+    current track is driven cleanly). Mastery-gating needs the trainer to feed
+    the eval mastery signal back to the strategy at runtime; that is a follow-up
+    that would reuse the early-stop mastery signal in
+    ``gym_dr/trainers/sb3/callbacks.py``.
+    """
+
+    train_worlds: List[str] = field(default_factory=lambda: ["reinvent_base"])
+    eval_worlds: List[str] = field(default_factory=list)
+    chunk_steps: int = 50_000
+    n_chunks: int = 20
+    unlock_every: int = 3
+    recency_weight: float = 2.0
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.train_worlds, str):
+            object.__setattr__(self, "train_worlds", [self.train_worlds])
+        if isinstance(self.eval_worlds, str):
+            object.__setattr__(self, "eval_worlds", [self.eval_worlds])
+        if not self.train_worlds:
+            raise ValueError("StochasticCurriculum needs at least one train world")
+        if self.n_chunks < 1:
+            raise ValueError("n_chunks must be >= 1")
+        if self.recency_weight <= 0:
+            raise ValueError("recency_weight must be > 0")
+
+    def training_chunks(self) -> List[WorldChunk]:
+        import random
+
+        rng = random.Random(self.seed)
+        n_tracks = len(self.train_worlds)
+        every = max(1, self.unlock_every)
+        chunks: List[WorldChunk] = []
+        for i in range(self.n_chunks):
+            window = min(n_tracks, 1 + i // every)
+            weights = [self.recency_weight ** j for j in range(window)]
+            world = rng.choices(self.train_worlds[:window], weights=weights, k=1)[0]
+            chunks.append(WorldChunk(world, self.chunk_steps))
+        return chunks
+
+    def evaluation_worlds(self) -> List[str]:
+        return list(self.eval_worlds)
+
+    def first_world(self) -> str:
+        # Chunk 0 always samples from a window of size 1, so this is deterministic.
+        return self.train_worlds[0]

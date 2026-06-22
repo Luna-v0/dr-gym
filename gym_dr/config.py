@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from gym_dr.action_space import ActionSpaceConfig, ContinuousActionSpaceConfig
+from gym_dr.domain_randomization import DomainRandomizationConfig
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
 from gym_dr.worlds import SequentialRotation, WorldStrategy
 
@@ -262,15 +263,16 @@ def _default_reward():
 
 
 def _default_eval_reward():
-    # progress_safe is the eval-only "stay on track and finish fast" metric:
-    # monotone in lap pace on-track, large negative penalty (-100) per
-    # off-track step so any track exit dominates the episode total. Fair
-    # cross-trial comparison since it's invariant to the training reward
-    # an HPO trial happened to sample. NEVER use this as a training reward
-    # — the large negative would destabilise PPO; use it only as eval_reward.
-    from gym_dr.rewards import progress_safe
+    # clean_completion is the eval-only yardstick that matches the maintainer's
+    # success criterion: finish the lap WITHOUT leaving the track, at a
+    # reasonable (non-minimum) speed. It replaced progress_safe as the default
+    # because progress_safe is dominated by speed^2 and barely penalises
+    # off-track, so it couldn't tell a 0.2%-progress policy from a 50% one (see
+    # docs/reports/scope-review.md, docs/eval-protocol.md). Eval-only — never a
+    # training reward. progress_safe stays importable for back-compat.
+    from gym_dr.rewards import clean_completion
 
-    return progress_safe
+    return clean_completion
 
 
 @dataclass(frozen=True)
@@ -323,12 +325,12 @@ class ExperimentConfig:
     eval_reward: Callable[[dict], float] = field(default_factory=_default_eval_reward)
     """``(params: dict) -> float`` — the *evaluation* reward, computed in
     parallel to the training reward and logged per-episode as
-    ``dr/ep_eval_reward``. Default ``progress_safe``: progress-per-step
-    on-track, with a large per-step penalty (-100) when any wheel leaves
-    the track, so any track exit dominates the episode total. Invariant
-    to the training reward chosen per trial, so HPO trials that sweep
-    different training rewards can still be ranked fairly on this metric.
-    Doesn't affect what the policy optimizes (that's ``reward``)."""
+    ``dr/ep_eval_reward``. Default ``clean_completion``: rewards finishing the
+    lap without leaving the track, at a reasonable (non-minimum) speed —
+    matching the success criterion (see ``docs/eval-protocol.md``). Invariant
+    to the training reward chosen per trial, so HPO trials that sweep different
+    training rewards can still be ranked fairly. Doesn't affect what the policy
+    optimizes (that's ``reward``)."""
 
     action_space: ActionSpaceConfig = field(default_factory=ContinuousActionSpaceConfig)
     """Continuous bounds (steering and speed ranges) or a discrete action
@@ -348,6 +350,11 @@ class ExperimentConfig:
     existing configs behave exactly as before. Use
     :class:`~gym_dr.worlds.OrderedSplit` to train on one ordered list and
     evaluate on another."""
+
+    domain_randomization: DomainRandomizationConfig | None = None
+    """Opt-in domain randomization — actuator/observation noise wrappers wired by
+    the env factory (see :class:`gym_dr.domain_randomization.DomainRandomizationConfig`).
+    Default None = no randomization. Targets environmental robustness (W-dr)."""
 
     object_avoidance: ObjectAvoidanceConfig | None = None
     """Optional static-obstacle Object Avoidance settings. ``None`` (the
@@ -444,6 +451,11 @@ class ExperimentConfig:
             "object_avoidance": (
                 dataclasses.asdict(self.object_avoidance)
                 if self.object_avoidance is not None
+                else None
+            ),
+            "domain_randomization": (
+                dataclasses.asdict(self.domain_randomization)
+                if self.domain_randomization is not None
                 else None
             ),
             "training": dataclasses.asdict(self.training),

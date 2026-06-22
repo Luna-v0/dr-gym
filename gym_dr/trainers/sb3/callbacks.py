@@ -30,7 +30,7 @@ def _make_eval_collector(
     Returns ``(callback, count, episodes)``; the caller reads them after
     ``evaluate_policy`` returns.
     """
-    count = {"n": 0}
+    count = {"n": 0, "completed": 0, "clean": 0}
     episodes: list[dict] = []
 
     def _cb(locals_: dict, _globals: dict) -> None:
@@ -40,8 +40,13 @@ def _make_eval_collector(
         if not isinstance(info, dict):
             return
         summary = info.get("dr_episode")
-        if summary and summary.get("dr/ep_ended_offtrack", 0.0):
-            count["n"] += 1
+        if summary:
+            if summary.get("dr/ep_ended_offtrack", 0.0):
+                count["n"] += 1
+            if summary.get("dr/ep_completed", 0.0):
+                count["completed"] += 1
+            if summary.get("dr/ep_completed_clean", 0.0):
+                count["clean"] += 1
         if capture_paths:
             path = info.get("dr_episode_path")
             if path:
@@ -223,6 +228,8 @@ class CtxEvalCallback(_EarlyStopMixin, EvalCallback):
         super().__init__(*args, **kwargs)
         self._ctx = ctx
         self._offtrack_resets = 0
+        self._completed = 0
+        self._clean = 0
         self._eval_episodes: list[dict] = []
         self._es_init()
 
@@ -237,8 +244,13 @@ class CtxEvalCallback(_EarlyStopMixin, EvalCallback):
         if not isinstance(info, dict):
             return
         summary = info.get("dr_episode")
-        if summary and summary.get("dr/ep_ended_offtrack", 0.0):
-            self._offtrack_resets += 1
+        if summary:
+            if summary.get("dr/ep_ended_offtrack", 0.0):
+                self._offtrack_resets += 1
+            if summary.get("dr/ep_completed", 0.0):
+                self._completed += 1
+            if summary.get("dr/ep_completed_clean", 0.0):
+                self._clean += 1
         path = info.get("dr_episode_path")
         if path:
             self._eval_episodes.append(path)
@@ -250,6 +262,8 @@ class CtxEvalCallback(_EarlyStopMixin, EvalCallback):
             state.use_eval_reward = True
         if is_eval_step:
             self._offtrack_resets = 0
+            self._completed = 0
+            self._clean = 0
             self._eval_episodes = []
         try:
             proceed = super()._on_step()
@@ -261,10 +275,19 @@ class CtxEvalCallback(_EarlyStopMixin, EvalCallback):
             # series and the global series coincide; log both so the metric name
             # is consistent with the multi-world callback.
             self.logger.record("eval/offtrack_resets", float(self._offtrack_resets))
+            n_eps = max(1, self.n_eval_episodes)
+            self.logger.record("eval/completion_rate", self._completed / n_eps)
+            self.logger.record("eval/clean_completion_rate", self._clean / n_eps)
             world = getattr(state, "world_name", None)
             if world:
                 self.logger.record(
                     f"eval/{world}_offtrack_resets", float(self._offtrack_resets)
+                )
+                self.logger.record(
+                    f"eval/{world}_completion_rate", self._completed / n_eps
+                )
+                self.logger.record(
+                    f"eval/{world}_clean_completion_rate", self._clean / n_eps
                 )
             if self._eval_episodes and world:
                 _log_eval_paths(
@@ -347,13 +370,13 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
 
         capture_paths = bool(getattr(self._ctx.training, "eval_path_plots", False))
         per_world: dict[str, float] = {}
-        offtrack_per_world: dict[str, int] = {}
+        counts_per_world: dict[str, dict] = {}
         if state is not None:
             state.use_eval_reward = True
         try:
             for world in self.eval_worlds:
                 self._swap(vec, world)
-                eval_cb, offtrack_count, episodes = _make_eval_collector(capture_paths)
+                eval_cb, counts, episodes = _make_eval_collector(capture_paths)
                 mean_reward, _ = evaluate_policy(
                     self.model,
                     vec,
@@ -363,7 +386,7 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
                     callback=eval_cb,
                 )
                 per_world[world] = float(mean_reward)
-                offtrack_per_world[world] = offtrack_count["n"]
+                counts_per_world[world] = counts
                 if capture_paths:
                     _log_eval_paths(self.logger, world, int(self.num_timesteps), episodes)
             # Restore the world training was on so the next rollout continues
@@ -380,12 +403,27 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
             self.logger.record(f"eval/{world}_mean_reward", m)
         self.logger.record("eval/mean_reward", agg)
         self.logger.record("eval/n_worlds", float(len(per_world)))
-        # Track-out resets: per-track count + a global sum across eval worlds.
-        for world, n_off in offtrack_per_world.items():
-            self.logger.record(f"eval/{world}_offtrack_resets", float(n_off))
+        # Track-out resets + completion rates, per-track and aggregated. The
+        # (clean-)completion rate is the success-criterion yardstick: the fraction
+        # of held-out eval episodes that finished the lap (cleanly, with no
+        # off-track step). See docs/eval-protocol.md.
+        n_eps = max(1, self.n_eval_episodes)
+        for world, c in counts_per_world.items():
+            self.logger.record(f"eval/{world}_offtrack_resets", float(c["n"]))
+            self.logger.record(f"eval/{world}_completion_rate", c["completed"] / n_eps)
+            self.logger.record(f"eval/{world}_clean_completion_rate", c["clean"] / n_eps)
         self.logger.record(
-            "eval/offtrack_resets", float(sum(offtrack_per_world.values()))
+            "eval/offtrack_resets", float(sum(c["n"] for c in counts_per_world.values()))
         )
+        if counts_per_world:
+            self.logger.record(
+                "eval/completion_rate",
+                float(np.mean([c["completed"] / n_eps for c in counts_per_world.values()])),
+            )
+            self.logger.record(
+                "eval/clean_completion_rate",
+                float(np.mean([c["clean"] / n_eps for c in counts_per_world.values()])),
+            )
 
         if per_world and agg > self.best_mean_reward:
             self.best_mean_reward = agg
@@ -394,7 +432,9 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
         self._ctx.report_eval(agg, int(self.num_timesteps))
         # Track-mastery early stop, measured across all eval worlds this round.
         total_eps = self.n_eval_episodes * max(1, len(self.eval_worlds))
-        if self._apply_early_stop(sum(offtrack_per_world.values()), total_eps):
+        if self._apply_early_stop(
+            sum(c["n"] for c in counts_per_world.values()), total_eps
+        ):
             return False
         return True
 

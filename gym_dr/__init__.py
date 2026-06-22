@@ -28,6 +28,7 @@ from gym_dr.config import (
     load_search_space,
 )
 from gym_dr.envs import time_trial
+from gym_dr.domain_randomization import DomainRandomizationConfig
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
 from gym_dr.seeding import ReplicateSeeds, SeedManager
 from gym_dr.rewards import (
@@ -35,6 +36,7 @@ from gym_dr.rewards import (
     anti_zigzag,
     center_line,
     centerline_quadratic,
+    clean_completion,
     object_avoidance_aware,
     progress_and_speed,
     progress_per_step,
@@ -46,6 +48,7 @@ from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
 from gym_dr.worlds import (
     OrderedSplit,
     SequentialRotation,
+    StochasticCurriculum,
     WorldChunk,
     WorldStrategy,
 )
@@ -55,6 +58,7 @@ __all__ = [
     "ContinuousActionSpaceConfig",
     "DiscreteAction",
     "DiscreteActionSpaceConfig",
+    "DomainRandomizationConfig",
     "ExperimentConfig",
     "ObjectAvoidanceConfig",
     "ReplicateSeeds",
@@ -66,6 +70,7 @@ __all__ = [
     "Trainer",
     "OrderedSplit",
     "SequentialRotation",
+    "StochasticCurriculum",
     "WorldChunk",
     "WorldStrategy",
     "TrainingConfig",
@@ -76,6 +81,7 @@ __all__ = [
     "anti_zigzag",
     "center_line",
     "centerline_quadratic",
+    "clean_completion",
     "display_name",
     "existing_tracks",
     "inspect",

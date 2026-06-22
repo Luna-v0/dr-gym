@@ -68,6 +68,45 @@ class ActionBounds(gym.ActionWrapper):
         return np.clip(a, self._low, self._high)
 
 
+class NormalizeActions(gym.ActionWrapper):
+    """Present a symmetric ``[-1, 1]`` action space to the policy and map it
+    linearly onto the inner env's (engineering-unit) Box.
+
+    PPO's diagonal-Gaussian policy initializes ``log_std = 0`` (std ≈ 1.0) *per
+    action dimension, in the action space's own units*. Against the raw
+    DeepRacer Box ``[-30,30] × [speed_low, speed_high]`` that means steering
+    explores only ~±1° (≈1.7% of its range) while speed explores ±1 m/s
+    (≈33%) — steering is barely explored, so the policy struggles to learn to
+    corner (see ``docs/reports/q1-generalization.md``). Rescaling every
+    dimension to ``[-1, 1]`` makes the unit Gaussian explore each dimension
+    comparably.
+
+    The inner env — and therefore the simapp, ``model_metadata.json`` and the
+    ONNX export — keeps operating in engineering units; only the action space
+    the *policy* sees changes. Wrap this OUTSIDE ``ActionBounds`` so ``[-1, 1]``
+    maps onto the configured ``[speed_low, speed_high]`` (etc.) range.
+    """
+
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        inner = env.action_space
+        if not isinstance(inner, gym.spaces.Box):
+            raise TypeError(
+                f"NormalizeActions expects a Box action space, got "
+                f"{type(inner).__name__}"
+            )
+        self._low = np.asarray(inner.low, dtype=np.float32)
+        self._high = np.asarray(inner.high, dtype=np.float32)
+        self.action_space = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=inner.shape, dtype=np.float32
+        )
+
+    def action(self, action):
+        a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+        # [-1, 1] -> [low, high]
+        return self._low + (a + 1.0) * 0.5 * (self._high - self._low)
+
+
 class GrayscaleObs(gym.ObservationWrapper):
     """Convert RGB image keys in a Dict observation to single-channel gray.
 
@@ -110,3 +149,60 @@ def _is_rgb(space: Any) -> bool:
         and len(space.shape) == 3
         and space.shape[-1] == 3
     )
+
+
+class ActuatorNoise(gym.ActionWrapper):
+    """Add Gaussian noise to the commanded action — actuator/calibration drift DR.
+
+    Noise is in **engineering units** (deg, m/s). Wrap it OUTSIDE ``ActionBounds``
+    (so the inner clip re-bounds the noisy command into the valid range) and
+    INSIDE ``NormalizeActions`` (so the [-1,1] policy action is mapped to eng
+    units before the noise is added). Std 0 ⇒ identity.
+    """
+
+    def __init__(self, env: gym.Env, *, steering_std: float = 0.0,
+                 speed_std: float = 0.0, seed: int | None = None) -> None:
+        super().__init__(env)
+        self._std = np.array([steering_std, speed_std], dtype=np.float32)
+        self._rng = np.random.default_rng(seed)
+
+    def action(self, action):
+        a = np.asarray(action, dtype=np.float32)
+        if np.any(self._std > 0) and a.shape[-1] == 2:
+            a = a + self._rng.normal(0.0, 1.0, size=a.shape).astype(np.float32) * self._std
+        return a
+
+
+class ObservationNoise(gym.ObservationWrapper):
+    """Perturb image observations — observation-noise / lighting DR.
+
+    For each uint8 image key in a Dict obs: optional per-step brightness jitter
+    (multiplicative) then additive Gaussian noise, clipped back to uint8 [0,255].
+    Apply OUTSIDE ``GrayscaleObs`` so it perturbs exactly what the policy sees.
+    Both knobs 0 ⇒ identity.
+    """
+
+    def __init__(self, env: gym.Env, *, gaussian_std: float = 0.0,
+                 brightness_jitter: float = 0.0, seed: int | None = None) -> None:
+        super().__init__(env)
+        self._std = float(gaussian_std)
+        self._bj = float(brightness_jitter)
+        self._rng = np.random.default_rng(seed)
+        self._img_keys: list[str] = []
+        if isinstance(env.observation_space, gym.spaces.Dict):
+            for key, sp in env.observation_space.spaces.items():
+                if isinstance(sp, gym.spaces.Box) and sp.dtype == np.uint8 and len(sp.shape) == 3:
+                    self._img_keys.append(key)
+
+    def observation(self, observation: dict) -> dict:
+        if (self._std <= 0 and self._bj <= 0) or not self._img_keys:
+            return observation
+        out = dict(observation)
+        for key in self._img_keys:
+            img = np.asarray(observation[key], dtype=np.float32)
+            if self._bj > 0:
+                img = img * (1.0 + self._rng.uniform(-self._bj, self._bj))
+            if self._std > 0:
+                img = img + self._rng.normal(0.0, self._std, size=img.shape)
+            out[key] = np.clip(img, 0, 255).astype(np.uint8)
+        return out
