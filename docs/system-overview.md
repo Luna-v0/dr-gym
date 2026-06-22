@@ -95,6 +95,23 @@ The full protocol is documented in the `gym_dr/app.py` module docstring. Key var
 evaluates on the same track(s) and measures no generalization gap** — this is exactly what
 `time_trail_hard_track_trial_18` did.
 
+## Parallelism / multiprocessing
+Parallelism is **container-level**, not in-process:
+- **HPO** (`gym_dr.study(..., n_parallel=K)`): the host spawns **K worker Docker containers**
+  (`gym_dr/docker_runner.py:spawn_workers`); each sets `GYM_DR_WORKER=1` and runs
+  `study.optimize(objective, …)` pulling trials from a **shared SQLite Optuna DB** (`STUDY_STORAGE`). K
+  independent Gazebo + SB3 processes, coordinated only by the Optuna DB.
+- **Within one container**, SB3 trains a **single env** — `DummyVecEnv([one])` + `VecFrameStack`, **not**
+  `SubprocVecEnv` — because each agent needs its own Gazebo (one sim per container). So there is **no
+  in-process env vectorisation**.
+- `scripts/throughput_benchmark.py` uses the same K-container mechanism, just to *measure* throughput.
+- **Consequence** (`docs/reports/throughput.md`): K separate containers **don't scale** on one GPU — the K
+  Gazebo instances contend on GPU rendering (it's render/inference-bound, not CPU-physics-bound). Untested
+  alternatives: **software-render + GPU-inference × K** (frees the GPU for the NN) and
+  **N-cars-in-one-world** (one Gazebo, namespaced agents — needs a deepracer-env feature).
+- A normal training (e.g. `p1p3_validation`) is a **single** container that rotates tracks in-process via
+  `set_world` (the curriculum) — that's sequential, not parallel.
+
 ## Where things live
 
 | Concern | File(s) |

@@ -28,6 +28,15 @@ critic + its own optimizer** (a custom algorithm subclass).
 | **SB3 + custom Lagrangian** | we own it | PPO-Lag / PID-Lag (build) | via a thin adapter | **trivial — already works** | **Yes** (everything reused) |
 | safety-starter-agents (OpenAI) | unmaintained, TF1 | PPO-Lag/CPO/TRPO-Lag | — | — | No |
 
+## PID-Lagrangian, turnkey — who joins it with PPO
+- **FSRL `PPOLagrangian` = PPO + PID-Lagrangian in ONE algorithm** (adaptive PID multiplier, Stooke et al.) —
+  confirmed in its docs. So for turnkey PID-Lagrangian-PPO it's a single agent; nothing to assemble.
+- **OmniSafe splits them:** `PPOLag` (plain Lagrangian = integral-only multiplier) vs `PPOPID` (the PID
+  variant) — a one-line config switch.
+- **TorchRL / RLlib:** no prominent turnkey PID-Lagrangian-PPO.
+So the realistic *adopt* options for PID-Lagrangian-PPO are **FSRL (`PPOLagrangian`)** or **OmniSafe
+(`PPOPID`)**; the *build* path (SB3) means implementing the PID multiplier ourselves.
+
 ## Recommendation — hybrid (adopt where cheap, build where integration friction is high)
 1. **Validate the *algorithm* on Safety-Gymnasium with OmniSafe (turnkey).** Confirms PPO-Lag / PID-Lag
    reproduces known safe-RL behaviour (trust), with zero custom code — exactly what a standard, well-tested
