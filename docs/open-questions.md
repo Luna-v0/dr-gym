@@ -33,7 +33,8 @@ same speed ⇒ GPU passthrough for rendering is unnecessary); the **Pi runs even
 run pending); the **cost-logging ✅ built** (empirical budget); the **trainer contract ✅ built**
 (`docs/trainer-contract.md`); the
 **deepracer-env edits** (`sim_time` exposure, random-start/direction, episode-lifecycle config — signed
-off); **SB3 PID-Lagrangian trainer** (after D9, against the new contract); **deepracer-utils** compat +
+off); **FSRL PPOLag backend** (D9 ✅ — scaffold + cost→info bridge + Safety-Gym validation built; validate
+in a separate venv, then finalize the Tianshou CNN); **deepracer-utils** compat +
 chart port; TFLite/ExecuTorch + **int8 quant** on the Pi; **software-render multi-instance + N-cars**
 throughput sweeps (need a free GPU); **perception net** + asymmetric critic (W-perception); the
 **`deepracer-deploy`** repo (on-car node + ServoCtrlMsg rescale + watchdog, ADR-0001).
@@ -77,7 +78,8 @@ throughput sweeps (need a free GPU); **perception net** + asymmetric critic (W-p
 ### Q4 🔴 `[DISS]` Safe-RL cost signal definition
 - **Known:** the 26-key `reward_params` (`deepracer-env .../agent_ctrl/constants.py:RewardParam`) offers
   candidate cost terms: off-track, crash, steering/jerk, near-edge time.
-- **Next:** decide and document the cost + limit before implementing PPO/PID-Lagrangian (W-saferl).
+- **Built:** cost is graded *risk* (`gym_dr/costs.py`) + logged (`dr/ep_mean_cost`) so the limit can be set
+  empirically from an unconstrained run; backend = FSRL `PPOLagAgent` (D9 ✅).
 
 ### Q5 🟡 `[BOTH]` Throughput architecture (= P2)
 - **Known:** camera-observation RL is rendering-bound; one Gazebo world steps physics once for all robots

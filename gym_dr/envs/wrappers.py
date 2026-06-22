@@ -215,3 +215,32 @@ class ObservationNoise(gym.ObservationWrapper):
                 img = img + self._rng.normal(0.0, std, size=img.shape)
             out[key] = np.clip(img, 0, 255).astype(np.uint8)
         return out
+
+
+class CostInfoWrapper(gym.Wrapper):
+    """Surface the graded-risk **cost** as ``info["cost"]`` for safe-RL backends
+    (FSRL / Tianshou, OmniSafe) that read the constraint signal from there.
+
+    The cost is already computed by the metrics tap: ``install_metrics`` wires a
+    ``cost_fn`` into ``_EpisodeMetrics`` (default ``cost_near_edge``), which runs it
+    on the reward-params each step and stores ``last_cost``. Build the env through
+    ``gym_dr.metrics.install_metrics`` and pass the resulting ``metrics_state``
+    here; this wrapper publishes ``state.last_cost`` as ``info["cost"]`` per step
+    (0.0 on reset). No deepracer-env change needed — it reuses the existing tap.
+    """
+
+    def __init__(self, env: gym.Env, metrics_state: Any) -> None:
+        super().__init__(env)
+        self._state = metrics_state
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        info = dict(info) if isinstance(info, dict) else {}
+        info["cost"] = 0.0
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info = dict(info) if isinstance(info, dict) else {}
+        info["cost"] = float(getattr(self._state, "last_cost", 0.0))
+        return obs, reward, terminated, truncated, info

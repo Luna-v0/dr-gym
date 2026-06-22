@@ -3,6 +3,14 @@
 Decision input for **D9**: which constrained-RL backend, and does OmniSafe let us change the network
 architecture cleanly?
 
+**DECIDED (2026-06-22): adopt FSRL `PPOLagAgent`** (PID-Lagrangian PPO in one algorithm). **Built so far:**
+the cost→`info["cost"]` bridge (`CostInfoWrapper`, reusing the graded `gym_dr/costs.py` tap, tested), an
+`FsrlTrainer` backend scaffold (`gym_dr/trainers/fsrl_trainer.py`, against the Trainer contract), and the
+Safety-Gymnasium validation script (`scripts/validate_fsrl_safetygym.py`). **Next** (gated on FSRL install
+in a *separate* venv — Tianshou pins clash with SB3): validate PPO-Lag on Safety-Gymnasium → finalize the
+Tianshou CNN for camera obs → DeepRacer constrained run with `cost_limit` from the empirically-logged
+`dr/ep_mean_cost`.
+
 ## Direct answer on OmniSafe + architecture
 OmniSafe is modular (Adapter/Wrapper patterns) and configures actor/critic via its **own** `ModelConfig` +
 model registry. Standard MLP/CNN nets are config-driven, but a **bespoke feature extractor like our

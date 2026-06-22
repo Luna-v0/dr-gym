@@ -53,7 +53,12 @@ OpenVINO** now (both run the ONNX), is thermally paced (cooldown + temp guard be
 `engine_benchmark.json`. **TFLite/ExecuTorch** need converted models — I'll generate + push `agent.tflite` /
 `agent.pte` next so they join the comparison.
 
-### D9 🟡 `[DISS]` Safe-RL backend → recommended **hybrid** (your call)
+### D9 ✅ `[DISS]` Safe-RL backend → **adopt FSRL `PPOLagAgent`** (PID-Lagrangian PPO)
+**Resolved (2026-06-22):** maintainer chose FSRL (PID + PPO-Lagrangian joined, turnkey). Built:
+`CostInfoWrapper` (cost→`info["cost"]`), `FsrlTrainer` scaffold, `scripts/validate_fsrl_safetygym.py`.
+Next (gated on FSRL install in a separate venv + a run): validate on Safety-Gymnasium → finalize the
+Tianshou CNN for camera obs → DeepRacer constrained run with `cost_limit` from empirical `dr/ep_mean_cost`.
+Original analysis ↓
 **Recommendation (2026-06-22, `docs/reports/safe-rl-backend.md`):** OmniSafe would NOT make our custom-CNN
 architecture changes cleaner — it'd re-port the whole stack into its abstractions. Proposed **hybrid**:
 validate the algorithm on **Safety-Gymnasium with OmniSafe** (turnkey, trustworthy) + build an **SB3

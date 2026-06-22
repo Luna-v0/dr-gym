@@ -53,6 +53,7 @@ class _EpisodeMetrics:
     eval_reward_sum: float = 0.0
     cost_sum: float = 0.0
     cost_max: float = 0.0
+    last_cost: float = 0.0
     offtrack_count: int = 0
     crash_count: int = 0
     max_progress: float = 0.0
@@ -99,6 +100,7 @@ class _EpisodeMetrics:
         self.eval_reward_sum = 0.0
         self.cost_sum = 0.0
         self.cost_max = 0.0
+        self.last_cost = 0.0
         self.offtrack_count = 0
         self.crash_count = 0
         self.max_progress = 0.0
@@ -140,6 +142,7 @@ class _EpisodeMetrics:
             except Exception:  # noqa: BLE001 — a buggy cost must not kill training
                 c = 0.0
             self.cost_sum += c
+            self.last_cost = c
             if c > self.cost_max:
                 self.cost_max = c
 

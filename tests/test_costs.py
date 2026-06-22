@@ -77,6 +77,32 @@ def test_episode_metrics_logs_cost():
     assert s["dr/ep_max_cost"] == 1.0
 
 
+def test_cost_info_wrapper_publishes_cost():
+    import gymnasium as gym
+    from gym_dr.envs.wrappers import CostInfoWrapper
+
+    class _State:
+        last_cost = 0.0
+
+    class _Env(gym.Env):
+        observation_space = gym.spaces.Box(0.0, 1.0, (1,))
+        action_space = gym.spaces.Discrete(2)
+
+        def reset(self, **kw):
+            return [0.0], {}
+
+        def step(self, a):
+            return [0.0], 1.0, True, False, {}
+
+    st = _State()
+    w = CostInfoWrapper(_Env(), st)
+    _o, info = w.reset()
+    assert info["cost"] == 0.0
+    st.last_cost = 0.7
+    _o, _r, _t, _tr, info = w.step(0)
+    assert info["cost"] == 0.7
+
+
 def test_config_cost_default_none_and_serializes():
     from gym_dr.config import ExperimentConfig
     e = ExperimentConfig(name="t")
