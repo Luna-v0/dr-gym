@@ -15,7 +15,15 @@ knobs: static randomization (done) and **automatic** (ADR, not yet built).
 - **Random direction** per episode.
 These ship with the deepracer-env edits batch (also `sim_time` exposure + episode-lifecycle config).
 
-## ADR — Automatic Domain Randomization (NOT built; ready to)
+## ADR — Automatic Domain Randomization (BUILT)
+**Implemented (2026-06-22):** `ADRController` + mutable `ADRState` (`gym_dr/domain_randomization.py`),
+live-range `ActuatorNoise`/`ObservationNoise` (read the current std each step), factory wiring
+(`DomainRandomizationConfig(adr=True, ...)`), and the post-eval hook in **both** the SB3
+`MultiWorldEvalCallback` and the custom-trainer `TrainingContext.evaluate` — so it scales DR ranges from the
+held-out `clean_completion_rate` and logs `adr/<dim>`. Tested (`tests/test_domain_randomization.py`). The
+`actuator_*`/`obs_*` config values act as the ceilings; ranges start at 0 and grow. **Pending:** a
+validation run + adding the env-side reset DR dims (start/direction) once they land. Design below.
+
 ADR (OpenAI dactyl-style) **expands the randomization ranges as the agent succeeds and contracts them when it
 fails**, so robustness auto-grows to the hardest level the policy can handle — no hand-tuned schedule.
 **Prerequisite now satisfied:** a per-eval success signal — `eval/clean_completion_rate` from
@@ -39,4 +47,5 @@ Moderate, **GPU-free to build** (controller + mutable-range wrappers + hook). Va
 from the curriculum's track-generalization gap.
 
 ## Status line
-static DR ✅ · reset DR (env-side) ⏳ signed off · **ADR ⏳ designed, ready to build** (prerequisite met).
+static DR ✅ · **ADR ✅ built** (controller + live wrappers + SB3 & custom-trainer eval hooks; tested) ·
+reset DR (env-side) ⏳ signed off · ADR/DR validation run ⏳.

@@ -420,10 +420,16 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
                 "eval/completion_rate",
                 float(np.mean([c["completed"] / n_eps for c in counts_per_world.values()])),
             )
-            self.logger.record(
-                "eval/clean_completion_rate",
-                float(np.mean([c["clean"] / n_eps for c in counts_per_world.values()])),
-            )
+            clean_rate = float(np.mean([c["clean"] / n_eps for c in counts_per_world.values()]))
+            self.logger.record("eval/clean_completion_rate", clean_rate)
+            # Automatic Domain Randomization: grow/shrink DR ranges on this signal.
+            try:
+                ctrl = vec.get_attr("adr_controller")[0]
+            except Exception:  # noqa: BLE001 — env has no ADR controller
+                ctrl = None
+            if ctrl is not None:
+                for k, v in ctrl.update(clean_rate).items():
+                    self.logger.record(k, v)
 
         if per_world and agg > self.best_mean_reward:
             self.best_mean_reward = agg

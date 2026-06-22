@@ -83,6 +83,12 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     # wrapper makes the bound real for both PPO's action distribution and the
     # commanded action that reaches Gazebo.
     dr = getattr(experiment, "domain_randomization", None)
+    adr_state = adr_controller = None
+    if dr is not None and getattr(dr, "adr", False):
+        from gym_dr.domain_randomization import ADRController, ADRState
+
+        adr_state = ADRState()
+        adr_controller = ADRController(dr, adr_state)
     cfg = experiment.action_space
     if isinstance(cfg, ContinuousActionSpaceConfig):
         env = ActionBounds(
@@ -98,7 +104,7 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
         if dr is not None and dr.has_action_noise:
             env = ActuatorNoise(
                 env, steering_std=dr.actuator_steering_std,
-                speed_std=dr.actuator_speed_std, seed=dr.seed,
+                speed_std=dr.actuator_speed_std, seed=dr.seed, adr_state=adr_state,
             )
         # Optionally let the policy act in a symmetric [-1, 1] space (mapped back
         # to engineering units for the env). Keeps the ONNX/on-car interface in
@@ -112,7 +118,7 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     if dr is not None and dr.has_obs_noise:
         env = ObservationNoise(
             env, gaussian_std=dr.obs_gaussian_std,
-            brightness_jitter=dr.obs_brightness_jitter, seed=dr.seed,
+            brightness_jitter=dr.obs_brightness_jitter, seed=dr.seed, adr_state=adr_state,
         )
     if dr is not None and (dr.random_start or dr.random_direction):
         import warnings
@@ -123,4 +129,8 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
             "— ignored until that lands.",
             stacklevel=2,
         )
+    if adr_controller is not None:
+        # Expose for the eval hook (SB3 callback via vec.get_attr, or ctx.evaluate)
+        # to call adr_controller.update(clean_completion_rate) after each eval.
+        env.adr_controller = adr_controller
     return env

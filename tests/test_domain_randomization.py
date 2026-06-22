@@ -4,6 +4,7 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 
+from gym_dr.domain_randomization import ADRController, ADRState, DomainRandomizationConfig
 from gym_dr.envs.wrappers import ActuatorNoise, ObservationNoise
 
 
@@ -66,3 +67,40 @@ def test_observation_noise_perturbs_stays_uint8():
     assert img.dtype == np.uint8
     assert img.min() >= 0 and img.max() <= 255
     assert not np.array_equal(img, np.full((8, 8, 1), 128, dtype=np.uint8))
+
+
+def test_adr_controller_grows_shrinks_clamps():
+    cfg = DomainRandomizationConfig(actuator_steering_std=10.0, obs_gaussian_std=20.0,
+                                    adr=True, adr_step=0.5, adr_promote=0.7, adr_demote=0.3)
+    st = ADRState()
+    ctrl = ADRController(cfg, st)
+    assert st.actuator_steering_std == 0.0
+    ctrl.update(0.9)                              # promote: +0.5*10 = 5
+    assert st.actuator_steering_std == 5.0 and st.obs_gaussian_std == 10.0
+    ctrl.update(0.9)                              # -> ceiling 10
+    assert st.actuator_steering_std == 10.0
+    ctrl.update(0.9)                              # clamp at ceiling
+    assert st.actuator_steering_std == 10.0
+    ctrl.update(0.1)                              # demote: -5 -> 5
+    assert st.actuator_steering_std == 5.0
+    r = ctrl.update(0.5)                          # in between: no change
+    assert st.actuator_steering_std == 5.0
+    assert r["adr/actuator_steering_std"] == 5.0
+
+
+def test_actuator_noise_reads_adr_state_live():
+    st = ADRState()
+    env = _ActEnv()
+    w = ActuatorNoise(env, seed=0, adr_state=st)
+    w.step(np.array([5.0, 2.0], dtype=np.float32))
+    assert np.allclose(env.last_action, [5.0, 2.0])   # ranges 0 -> no noise
+    st.actuator_steering_std = 5.0
+    st.actuator_speed_std = 0.5
+    w.step(np.array([5.0, 2.0], dtype=np.float32))
+    assert not np.allclose(env.last_action, [5.0, 2.0])  # live ranges -> noise now
+
+
+def test_config_adr_enables_wrappers():
+    assert DomainRandomizationConfig(adr=True).has_action_noise
+    assert DomainRandomizationConfig(adr=True).has_obs_noise
+    assert not DomainRandomizationConfig().has_action_noise

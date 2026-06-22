@@ -288,6 +288,9 @@ class TrainingContext:
         agg = _agg_over_worlds(per_world)
         flat = {f"eval/{w}_{k}": v for w, m in per_world.items() for k, v in m.items()}
         flat.update({f"eval/{k}": v for k, v in agg.items()})
+        ctrl = getattr(env, "adr_controller", None)  # Automatic Domain Randomization
+        if ctrl is not None:
+            flat.update(ctrl.update(agg.get("clean_completion_rate", 0.0)))
         self.log_metrics(flat, step)
         self.report_eval(agg.get("mean_reward", float("nan")), step)
         return agg

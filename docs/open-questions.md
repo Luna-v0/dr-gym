@@ -29,7 +29,9 @@ same speed ⇒ GPU passthrough for rendering is unnecessary); the **Pi runs even
 
 **Running:** D3 held-out validation (GPU/CUDA, ~20 h).
 
-**Queue (no input needed):** build **ADR** (auto DR — `docs/reports/domain-randomization.md`); the
+**Queue (no input needed):** **ADR ✅ built** (auto DR — `docs/reports/domain-randomization.md`; validation
+run pending); the **cost-logging ✅ built** (empirical budget); the **trainer contract ✅ built**
+(`docs/trainer-contract.md`); the
 **deepracer-env edits** (`sim_time` exposure, random-start/direction, episode-lifecycle config — signed
 off); **SB3 PID-Lagrangian trainer** (after D9, against the new contract); **deepracer-utils** compat +
 chart port; TFLite/ExecuTorch + **int8 quant** on the Pi; **software-render multi-instance + N-cars**

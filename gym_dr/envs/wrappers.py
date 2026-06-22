@@ -161,15 +161,21 @@ class ActuatorNoise(gym.ActionWrapper):
     """
 
     def __init__(self, env: gym.Env, *, steering_std: float = 0.0,
-                 speed_std: float = 0.0, seed: int | None = None) -> None:
+                 speed_std: float = 0.0, seed: int | None = None, adr_state=None) -> None:
         super().__init__(env)
         self._std = np.array([steering_std, speed_std], dtype=np.float32)
         self._rng = np.random.default_rng(seed)
+        self._adr = adr_state  # if set, read the (live, ADR-controlled) std each step
 
     def action(self, action):
         a = np.asarray(action, dtype=np.float32)
-        if np.any(self._std > 0) and a.shape[-1] == 2:
-            a = a + self._rng.normal(0.0, 1.0, size=a.shape).astype(np.float32) * self._std
+        if self._adr is not None:
+            std = np.array([self._adr.actuator_steering_std, self._adr.actuator_speed_std],
+                           dtype=np.float32)
+        else:
+            std = self._std
+        if np.any(std > 0) and a.shape[-1] == 2:
+            a = a + self._rng.normal(0.0, 1.0, size=a.shape).astype(np.float32) * std
         return a
 
 
@@ -183,11 +189,12 @@ class ObservationNoise(gym.ObservationWrapper):
     """
 
     def __init__(self, env: gym.Env, *, gaussian_std: float = 0.0,
-                 brightness_jitter: float = 0.0, seed: int | None = None) -> None:
+                 brightness_jitter: float = 0.0, seed: int | None = None, adr_state=None) -> None:
         super().__init__(env)
         self._std = float(gaussian_std)
         self._bj = float(brightness_jitter)
         self._rng = np.random.default_rng(seed)
+        self._adr = adr_state  # if set, read the (live, ADR-controlled) std/jitter each step
         self._img_keys: list[str] = []
         if isinstance(env.observation_space, gym.spaces.Dict):
             for key, sp in env.observation_space.spaces.items():
@@ -195,14 +202,16 @@ class ObservationNoise(gym.ObservationWrapper):
                     self._img_keys.append(key)
 
     def observation(self, observation: dict) -> dict:
-        if (self._std <= 0 and self._bj <= 0) or not self._img_keys:
+        std = self._adr.obs_gaussian_std if self._adr is not None else self._std
+        bj = self._adr.obs_brightness_jitter if self._adr is not None else self._bj
+        if (std <= 0 and bj <= 0) or not self._img_keys:
             return observation
         out = dict(observation)
         for key in self._img_keys:
             img = np.asarray(observation[key], dtype=np.float32)
-            if self._bj > 0:
-                img = img * (1.0 + self._rng.uniform(-self._bj, self._bj))
-            if self._std > 0:
-                img = img + self._rng.normal(0.0, self._std, size=img.shape)
+            if bj > 0:
+                img = img * (1.0 + self._rng.uniform(-bj, bj))
+            if std > 0:
+                img = img + self._rng.normal(0.0, std, size=img.shape)
             out[key] = np.clip(img, 0, 255).astype(np.uint8)
         return out
