@@ -38,7 +38,10 @@ answered 2026-06-21** — current state below. New questions get added as I hit 
 - [ ] **D3 validation training run (LAST):** launch + monitor real rtf/fps vs set; ≥ ~30 min before reading.
 
 ## New open questions
-### D8 🔲 `[REAL]` Which inference engine on the aarch64 custom car?
+### D8 ✅ `[REAL]` Inference engine on the aarch64 custom car → **onnxruntime**
+**Resolved (2026-06-22):** Pi benchmark — onnxruntime **11.7 ms** vs OpenVINO-ARM 13.6 ms
+(`docs/reports/oncar-engine-comparison.md`); ~80 Hz max ≫ 15 Hz control loop, even on the heavy net.
+onnxruntime chosen. int8 quantization + the 2-target (Pi vs stock x86) comparison tracked in that report.
 The custom car is a Pi4 **aarch64** with **no runtime installed**, and our OpenVINO IR pipeline is
 **x86-validated** (`docs/reports/car-baseline.md`). aarch64 options: **onnxruntime** (best ARM support),
 **OpenVINO ARM CPU plugin**, or **TFLite**. **Decision:** which to target first? Then I install it on the
@@ -50,7 +53,14 @@ OpenVINO** now (both run the ONNX), is thermally paced (cooldown + temp guard be
 `engine_benchmark.json`. **TFLite/ExecuTorch** need converted models — I'll generate + push `agent.tflite` /
 `agent.pte` next so they join the comparison.
 
-### D9 🔲 `[DISS]` Safe-RL backend for the `feat/safety-gymnasium` env?
+### D9 🟡 `[DISS]` Safe-RL backend → recommended **hybrid** (your call)
+**Recommendation (2026-06-22, `docs/reports/safe-rl-backend.md`):** OmniSafe would NOT make our custom-CNN
+architecture changes cleaner — it'd re-port the whole stack into its abstractions. Proposed **hybrid**:
+validate the algorithm on **Safety-Gymnasium with OmniSafe** (turnkey, trustworthy) + build an **SB3
+PID-Lagrangian `Trainer`** for DeepRacer (reuses DeepRacerCNN / curriculum / trace; full architecture
+control; adds a separate cost-critic + dual update). **Decide:** approve the hybrid, or go full OmniSafe?
+(You already OK'd installing `safety_gymnasium` + rebasing the branch.)
+Original question below ↓
 The branch adds `SafetyDeepRacerEnv` (a CMDP 6-tuple with a `cost`) + a `safety_gymnasium` registry. SB3 PPO
 (dr-gym's current trainer) ignores `cost`, so a real constrained run needs a safe-RL trainer. **Decision:**
 adopt **OmniSafe** (PPO/PID-Lagrangian, validate on Safety-Gymnasium first — recommended) vs hand-roll
