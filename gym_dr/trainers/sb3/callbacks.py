@@ -13,6 +13,24 @@ from stable_baselines3.common.callbacks import (
 )
 
 
+import os as _os
+
+
+def _touch_heartbeat() -> None:
+    """Touch the host-watchdog heartbeat (no-op if ``$GYM_DR_HEARTBEAT`` unset).
+    Called from BOTH the training HeartbeatCallback and the eval step-callback, so
+    a long eval phase (no training steps, several world swaps) doesn't look like a
+    hang. Env read per-call (throttled callers) so it's robust to late setting.
+    See docs/reports/d3-hang-postmortem.md."""
+    path = _os.getenv("GYM_DR_HEARTBEAT")
+    if not path:
+        return
+    try:
+        Path(path).touch()
+    except OSError:
+        pass
+
+
 def _make_eval_collector(
     capture_paths: bool = False,
 ) -> tuple[Any, dict[str, int], list[dict]]:
@@ -34,6 +52,7 @@ def _make_eval_collector(
     episodes: list[dict] = []
 
     def _cb(locals_: dict, _globals: dict) -> None:
+        _touch_heartbeat()  # keep the watchdog alive through long evals
         if not locals_.get("done"):
             return
         info = locals_.get("info") or {}
@@ -389,6 +408,18 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
                 counts_per_world[world] = counts
                 if capture_paths:
                     _log_eval_paths(self.logger, world, int(self.num_timesteps), episodes)
+            # Also score the CURRENT training world (held-in) so we can report a
+            # live generalization gap = train clean-completion − held-out mean.
+            # One extra eval, on the world we restore to anyway.
+            train_clean_rate = None
+            if train_world is not None and train_world not in per_world:
+                self._swap(vec, train_world)
+                eval_cb, train_counts, _eps = _make_eval_collector(False)
+                evaluate_policy(
+                    self.model, vec, n_eval_episodes=self.n_eval_episodes,
+                    deterministic=self.deterministic, warn=False, callback=eval_cb,
+                )
+                train_clean_rate = train_counts["clean"] / max(1, self.n_eval_episodes)
             # Restore the world training was on so the next rollout continues
             # on the right track (the env is shared with training).
             if train_world is not None:
@@ -422,6 +453,13 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
             )
             clean_rate = float(np.mean([c["clean"] / n_eps for c in counts_per_world.values()]))
             self.logger.record("eval/clean_completion_rate", clean_rate)
+            # Live generalization gap: how much worse the held-out tracks are than
+            # the track currently being trained. The success-criterion headline —
+            # a policy that drives held-out tracks as well as trained ones has
+            # gap ≈ 0. (docs/reports/q1-generalization.md, docs/eval-protocol.md)
+            if train_clean_rate is not None:
+                self.logger.record("eval/train_clean_completion_rate", train_clean_rate)
+                self.logger.record("eval/generalization_gap", train_clean_rate - clean_rate)
             # Automatic Domain Randomization: grow/shrink DR ranges on this signal.
             try:
                 ctrl = vec.get_attr("adr_controller")[0]
@@ -569,4 +607,27 @@ class RewardMetricsCallback(BaseCallback):
                     self.logger.record_mean(key, float(value))
                 except (TypeError, ValueError):
                     continue
+        return True
+
+
+class HeartbeatCallback(BaseCallback):
+    """Touch a heartbeat file periodically so the HOST can tell training is making
+    progress (vs. a wedged-but-alive gzserver, which hangs silently at high CPU —
+    see docs/reports/d3-hang-postmortem.md). The path comes from
+    ``$GYM_DR_HEARTBEAT``; if unset the callback is a no-op. Touched every
+    ``interval_steps`` env steps (cheap), and once on training start so the
+    host's boot grace can end as soon as the first rollout begins."""
+
+    def __init__(self, interval_steps: int = 256) -> None:
+        super().__init__()
+        self._interval = max(1, interval_steps)
+        self._last = 0
+
+    def _on_training_start(self) -> None:
+        _touch_heartbeat()
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last >= self._interval:
+            _touch_heartbeat()
+            self._last = self.num_timesteps
         return True

@@ -5,18 +5,18 @@ from __future__ import annotations
 from gym_dr import (
     ExperimentConfig,
     OrderedSplit,
-    SequentialRotation,
+    FixedWorlds,
     WorldsConfig,
     WorldStrategy,
 )
 from gym_dr.worlds import WorldChunk
 
 
-# --- SequentialRotation -----------------------------------------------------
+# --- FixedWorlds -----------------------------------------------------
 
 
 def test_sequential_rotation_chunk_order_and_steps():
-    s = SequentialRotation(names=["A", "B"], chunk_steps=1000, rotations=2)
+    s = FixedWorlds(names=["A", "B"], chunk_steps=1000, rotations=2)
     chunks = s.training_chunks()
     assert [c.world for c in chunks] == ["A", "B", "A", "B"]
     assert all(c.steps == 1000 for c in chunks)
@@ -25,7 +25,7 @@ def test_sequential_rotation_chunk_order_and_steps():
 
 
 def test_sequential_rotation_coerces_bare_string():
-    assert SequentialRotation(names="Oval_track").names == ["Oval_track"]
+    assert FixedWorlds(names="Oval_track").names == ["Oval_track"]
 
 
 # --- OrderedSplit -----------------------------------------------------------
@@ -67,7 +67,7 @@ def test_effective_strategy_defaults_to_sequential_from_worlds():
         name="t", worlds=WorldsConfig(names=["X", "Y"], chunk_steps=500, rotations=3)
     )
     s = exp.effective_strategy()
-    assert isinstance(s, SequentialRotation)
+    assert isinstance(s, FixedWorlds)
     assert [c.world for c in s.training_chunks()] == ["X", "Y"] * 3
     assert s.chunk_steps == 500
     assert s.evaluation_worlds() == []

@@ -170,12 +170,43 @@ class ActuatorNoise(gym.ActionWrapper):
     def action(self, action):
         a = np.asarray(action, dtype=np.float32)
         if self._adr is not None:
-            std = np.array([self._adr.actuator_steering_std, self._adr.actuator_speed_std],
+            std = np.array([self._adr.steering_noise, self._adr.speed_noise],
                            dtype=np.float32)
         else:
             std = self._std
         if np.any(std > 0) and a.shape[-1] == 2:
             a = a + self._rng.normal(0.0, 1.0, size=a.shape).astype(np.float32) * std
+        return a
+
+
+class DragRandomization(gym.ActionWrapper):
+    """Per-episode throttle→speed effectiveness ("drag") randomization for sim2real.
+
+    At each ``reset`` draw a factor ``~U[drag_min, 1.0]`` and multiply the commanded
+    speed (``action[1]``, engineering units) by it for the whole episode — so a given
+    throttle reaches different speeds across episodes, exactly the sim-vs-real
+    mismatch (motor/drag/battery/surface). Wrap like ``ActuatorNoise`` (outside
+    ``ActionBounds`` so the inner clip re-bounds, inside ``NormalizeActions``). The
+    policy observes the *achieved* speed (raw m/s feature) and learns to react to it
+    instead of assuming a fixed throttle→speed map. ``drag_min=1.0`` ⇒ identity.
+    """
+
+    def __init__(self, env: gym.Env, *, drag, seed: int | None = None) -> None:
+        super().__init__(env)
+        from gym_dr.randomization import sample_spec
+        self._drag = drag                      # ParamSpec (Range/Choice/scalar)
+        self._sample = sample_spec
+        self._rng = np.random.default_rng(seed)
+        self._factor = 1.0
+
+    def reset(self, **kwargs):
+        self._factor = float(self._sample(self._drag, self._rng))
+        return self.env.reset(**kwargs)
+
+    def action(self, action):
+        a = np.asarray(action, dtype=np.float32).copy()
+        if a.shape[-1] == 2:
+            a[1] = a[1] * self._factor          # scale commanded speed (eng units)
         return a
 
 
@@ -202,8 +233,8 @@ class ObservationNoise(gym.ObservationWrapper):
                     self._img_keys.append(key)
 
     def observation(self, observation: dict) -> dict:
-        std = self._adr.obs_gaussian_std if self._adr is not None else self._std
-        bj = self._adr.obs_brightness_jitter if self._adr is not None else self._bj
+        std = self._adr.obs_gaussian if self._adr is not None else self._std
+        bj = self._adr.obs_brightness if self._adr is not None else self._bj
         if (std <= 0 and bj <= 0) or not self._img_keys:
             return observation
         out = dict(observation)

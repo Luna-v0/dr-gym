@@ -145,7 +145,7 @@ def run_training(experiment: ExperimentConfig, trial: Any | None = None) -> floa
     from gym_dr.metrics import install_metrics
 
     experiment, env_wrapper, metrics_state = install_metrics(experiment, run_dir=run_dir)
-    # The world schedule (strategy pattern). Falls back to a SequentialRotation
+    # The world schedule (strategy pattern). Falls back to a FixedWorlds
     # built from experiment.worlds when no explicit strategy is set, so this is
     # the single source of truth for world order + evaluation worlds.
     strategy = experiment.effective_strategy()

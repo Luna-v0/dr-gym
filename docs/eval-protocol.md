@@ -17,6 +17,8 @@ Read these (logged to TensorBoard + MLflow each evaluation):
 | `eval/<world>_offtrack_resets` | eval episodes that ended off-track | diagnoses *why* clean-rate is low |
 | `dr/ep_mean_speed` (eval) | average speed | the "reasonable, non-minimum speed" axis |
 | `eval/<world>_mean_reward` | sum of `eval_reward` (use `clean_completion`) | model-selection / Optuna signal |
+| `eval/train_clean_completion_rate` | clean-completion on the **current training** world (one extra eval) | the held-in reference for the gap |
+| `eval/generalization_gap` | `train_clean − held-out_mean clean` | **the headline** — 0 ⇒ generalizes; large ⇒ overfits |
 
 Per training rollout, `dr/ep_completed` and `dr/ep_completed_clean` give the same signal on the *training*
 tracks.
@@ -25,8 +27,10 @@ tracks.
 off-track by only −1.0, so it can't discriminate (see `docs/reports/scope-review.md`).
 
 ## Generalization gap
-`gap = mean(train-track clean_completion_rate) − mean(held-out clean_completion_rate)`. Report it every run.
-A small gap with a high held-out rate is the goal; a large gap means it overfits the training tracks.
+`gap = mean(train-track clean_completion_rate) − mean(held-out clean_completion_rate)`. Reported **every
+evaluation as a live TB/MLflow scalar** (`eval/generalization_gap`, `MultiWorldEvalCallback` runs one extra
+eval on the current training world). A small gap with a high held-out rate is the goal; a large gap means it
+overfits the training tracks.
 
 ## Held-out split
 Use `OrderedSplit(train_worlds=..., eval_worlds=...)` (or `StochasticCurriculum`) with **disjoint,

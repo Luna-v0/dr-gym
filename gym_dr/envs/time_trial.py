@@ -62,6 +62,7 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     from gym_dr.envs.wrappers import (
         ActionBounds,
         ActuatorNoise,
+        DragRandomization,
         GrayscaleObs,
         NormalizeActions,
         ObservationNoise,
@@ -71,24 +72,50 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     upstream_oa = (
         oa_cfg.to_upstream() if oa_cfg is not None and oa_cfg.enabled else None
     )
+    dr = getattr(experiment, "domain_randomization", None)
+    # Random valid-start / random-direction are deepracer-env reset modes (W-dr);
+    # pass them through as a controller config override when DR requests them.
+    reset_config: dict = {}
+    if dr is not None and getattr(dr, "random_start", False):
+        reset_config["random_start"] = True
+    if dr is not None and getattr(dr, "random_direction", False):
+        reset_config["random_direction"] = True
+    # NOTE: we DON'T flip IS_CONTINUOUS here. Doing so (one-lap termination) changes
+    # the episode-return scale, which (a) collapses a resumed policy whose value head
+    # was trained on multi-lap returns, and (b) the lap-complete trigger isn't
+    # start-relative so it mismeasures under random_start. Instead we cap episode
+    # LENGTH with a TimeLimit (truncation) below — bounds eval without changing the
+    # episode structure / value scale. See docs/reports/multicar_throughput.md.
     env = DeepRacerEnv(
         reward_fn=experiment.reward,
         sensors=list(experiment.action_space.sensor),
         object_avoidance=upstream_oa,
+        config=reset_config or None,
     )
+    # Cap episode LENGTH (truncation, not termination) so a clean policy can't run
+    # the DeepRacer continuous multi-lap mode up to NUMBER_OF_TRIALS=1000 laps (which
+    # made eval take hours). ~1 lap is ~900-1300 steps here; 1500 leaves margin to
+    # finish a lap from any random start. Truncation => SB3/GAE bootstraps V at the
+    # cap (correct), and IS_CONTINUOUS stays True so the value scale / resumed policy
+    # are unchanged. Override with GYM_DR_MAX_EPISODE_STEPS (0 disables).
+    import os
+    _maxsteps = int(os.getenv("GYM_DR_MAX_EPISODE_STEPS", "1500"))
+    if _maxsteps > 0:
+        from gymnasium.wrappers import TimeLimit
+        env = TimeLimit(env, max_episode_steps=_maxsteps)
     # Enforce ``ContinuousActionSpaceConfig`` bounds at the wrapper level.
     # Upstream's default action space is ``Box([-30, 0.1], [30, 4.0])`` and its
     # rollout controller hardcodes ``MIN_SPEED=0.1`` — passing a tighter
     # ``speed_low`` only flows into ``model_metadata.json`` otherwise. The
     # wrapper makes the bound real for both PPO's action distribution and the
     # commanded action that reaches Gazebo.
-    dr = getattr(experiment, "domain_randomization", None)
     adr_state = adr_controller = None
-    if dr is not None and getattr(dr, "adr", False):
+    if dr is not None and getattr(dr, "is_adr", False):
         from gym_dr.domain_randomization import ADRController, ADRState
 
         adr_state = ADRState()
         adr_controller = ADRController(dr, adr_state)
+    from gym_dr.randomization import spec_bounds  # Range/Choice/scalar -> (low, high)
     cfg = experiment.action_space
     if isinstance(cfg, ContinuousActionSpaceConfig):
         env = ActionBounds(
@@ -98,13 +125,18 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
             speed_low=cfg.speed_low,
             speed_high=cfg.speed_high,
         )
+        # Drag DR: per-episode throttle->speed scaling (sim2real), applied just
+        # before the inner ActionBounds clip so a draggier episode reaches lower
+        # speed. The raw-m/s speed feature reflects the achieved speed.
+        if dr is not None and dr.has_drag:
+            env = DragRandomization(env, drag=dr.drag, seed=dr.seed)
         # Actuator-noise DR (engineering units) sits between ActionBounds (inner
         # clip, re-bounds the noisy command) and NormalizeActions (outer
         # [-1,1]->eng map applied first). See docs/reports/domain-randomization.md.
         if dr is not None and dr.has_action_noise:
             env = ActuatorNoise(
-                env, steering_std=dr.actuator_steering_std,
-                speed_std=dr.actuator_speed_std, seed=dr.seed, adr_state=adr_state,
+                env, steering_std=spec_bounds(dr.steering_noise)[1],
+                speed_std=spec_bounds(dr.speed_noise)[1], seed=dr.seed, adr_state=adr_state,
             )
         # Optionally let the policy act in a symmetric [-1, 1] space (mapped back
         # to engineering units for the env). Keeps the ONNX/on-car interface in
@@ -117,18 +149,12 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     # wraps OUTSIDE GrayscaleObs.
     if dr is not None and dr.has_obs_noise:
         env = ObservationNoise(
-            env, gaussian_std=dr.obs_gaussian_std,
-            brightness_jitter=dr.obs_brightness_jitter, seed=dr.seed, adr_state=adr_state,
+            env, gaussian_std=spec_bounds(dr.obs_gaussian)[1],
+            brightness_jitter=spec_bounds(dr.obs_brightness)[1], seed=dr.seed, adr_state=adr_state,
         )
-    if dr is not None and (dr.random_start or dr.random_direction):
-        import warnings
-
-        warnings.warn(
-            "domain_randomization.random_start/random_direction need a "
-            "deepracer-env reset change (see docs/reports/domain-randomization.md) "
-            "— ignored until that lands.",
-            stacklevel=2,
-        )
+    # random_start / random_direction are now honoured via the controller config
+    # above (deepracer-env RANDOM_START / RANDOM_DIRECTION reset modes) — needs
+    # the rebuilt sim image. See docs/reports/domain-randomization.md.
     if adr_controller is not None:
         # Expose for the eval hook (SB3 callback via vec.get_attr, or ctx.evaluate)
         # to call adr_controller.update(clean_completion_rate) after each eval.

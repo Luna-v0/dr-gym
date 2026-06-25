@@ -6,10 +6,28 @@ architecture cleanly?
 **DECIDED (2026-06-22): adopt FSRL `PPOLagAgent`** (PID-Lagrangian PPO in one algorithm). **Built so far:**
 the cost→`info["cost"]` bridge (`CostInfoWrapper`, reusing the graded `gym_dr/costs.py` tap, tested), an
 `FsrlTrainer` backend scaffold (`gym_dr/trainers/fsrl_trainer.py`, against the Trainer contract), and the
-Safety-Gymnasium validation script (`scripts/validate_fsrl_safetygym.py`). **Next** (gated on FSRL install
-in a *separate* venv — Tianshou pins clash with SB3): validate PPO-Lag on Safety-Gymnasium → finalize the
-Tianshou CNN for camera obs → DeepRacer constrained run with `cost_limit` from the empirically-logged
-`dr/ep_mean_cost`.
+Safety-Gymnasium validation script (`scripts/validate_fsrl_safetygym.py`).
+
+**VALIDATED (2026-06-22): PPO-Lag runs end-to-end on Safety-Gymnasium and exhibits correct constrained
+behaviour.** Setup that worked: a *separate* `.venv-safe` on **Python 3.10** (3.11 fails — safety-gymnasium
+pins `pygame==2.1.0`, which has no 3.11 wheel and won't build from source here; 3.10 gets the prebuilt
+wheel), `uv pip install fast-safe-rl safety-gymnasium` (tianshou 0.5.1). **One integration bug, fixed:**
+Safety-Gymnasium tasks return a CMDP **6-tuple** `(obs, reward, cost, terminated, truncated, info)`, but
+Tianshou/FSRL (and gymnasium's passive checker) expect the 5-tuple with cost in `info["cost"]`. Added a
+`_CostToInfo` wrapper in the validation script + built envs via `safety_gymnasium.make` (avoids the passive
+checker rejecting the 6-tuple). **This is the same `info["cost"]` contract as our DeepRacer
+`CostInfoWrapper`** — so the bridge is proven on both sides. Result on `SafetyPointGoal1-v0` (`cost_limit=10`, 20 epochs, ~10 min on CPU):
+the PID multiplier drives episode cost down under the limit while reward rises — **the ideal CMDP outcome.
+Final: `best_reward` 17.5 (from negative early on) with `best_cost` 9.0 (≤ limit 10)**; mid-run the multiplier
+visibly trades off (cost dipped to 3 at epoch 5 when reward was still negative, then both re-balanced).
+Textbook Lagrangian dynamics ⇒ **the algorithm is trustworthy**. (`PPOLagAgent` verified kwargs:
+`cost_limit, device, seed, lr, hidden_sizes, target_kl, gamma`; the DeepRacer camera path uses the lower-level
+`PPOLagrangian` policy with a Tianshou CNN `preprocess_net` + separate reward/cost `Critic`s — see
+`gym_dr/trainers/fsrl_trainer.py`.)
+
+**Next:** finalize the Tianshou CNN for camera obs in `FsrlTrainer` (+ the asymmetric cost-critic, see
+`docs/reports/perception.md`) → DeepRacer constrained run with `cost_limit` from the empirically-logged
+`dr/ep_mean_cost` (D3 is logging it now).
 
 ## Direct answer on OmniSafe + architecture
 OmniSafe is modular (Adapter/Wrapper patterns) and configures actor/critic via its **own** `ModelConfig` +

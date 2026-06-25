@@ -33,7 +33,10 @@ if [[ ! -d "${LOGDIR}" ]]; then
 fi
 
 echo "Serving TensorBoard from ${LOGDIR} on http://localhost:${PORT}"
-uv run --project "${PROJECT_DIR}" tensorboard \
+# --no-sync: run TB from the existing venv WITHOUT re-resolving the project's
+# deps (the optimize/dev extras have a tensorflow vs onnxscript typing-extensions
+# conflict that makes a fresh `uv run` resolution fail on non-3.8 Python markers).
+uv run --no-sync --project "${PROJECT_DIR}" tensorboard \
   --logdir "${LOGDIR}" \
   --host 0.0.0.0 \
   --port "${PORT}"

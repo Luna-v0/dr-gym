@@ -47,11 +47,31 @@ from typing import Any, Callable
 
 from gym_dr.config import ExperimentConfig
 
-# Container exit code meaning "gzserver crashed mid-rotation; relaunch me to
-# resume from the checkpoint". Chosen as EX_TEMPFAIL (75) so it can't collide
-# with a normal 0/1 exit. Shared by _train_one_chunk (sets it) and _train_host
-# (acts on it).
-_SIM_RESTART_RC = 75
+# Container exit code meaning "sim died/hung mid-rotation; relaunch me to resume
+# from the checkpoint". EX_TEMPFAIL (75), can't collide with a normal 0/1 exit.
+# Set by _train_one_chunk on a gzserver crash AND returned by the host watchdog
+# on a hang (docker_runner) — _train_host acts on it either way. Single source of
+# truth in docker_runner so the two stay in sync.
+from gym_dr.docker_runner import SIM_RESTART_RC as _SIM_RESTART_RC  # noqa: E402
+
+
+def _newest_checkpoint(artifacts_dir: "Path", name: str) -> str | None:
+    """Container path to the highest-step checkpoint for ``name``, or None.
+    Used by the watchdog hang-recovery to resume with weights preserved."""
+    ckpt_dir = artifacts_dir / name / "checkpoints"
+    if not ckpt_dir.is_dir():
+        return None
+    best, best_steps = None, -1
+    for p in ckpt_dir.glob("*_steps.zip"):
+        try:
+            steps = int(p.stem.split("_steps")[0].rsplit("_", 1)[-1])
+        except (ValueError, IndexError):
+            continue
+        if steps > best_steps:
+            best, best_steps = p, steps
+    if best is None:
+        return None
+    return f"/workspace/artifacts/{name}/checkpoints/{best.name}"
 
 
 def train(experiment: ExperimentConfig) -> Any:
@@ -89,7 +109,7 @@ def study(
     one shared SQLite-backed Optuna study. The world schedule comes from
     ``base.effective_strategy()``: a single-world study trains every trial on
     ``first_world()``, while a multi-world strategy (multi-world
-    ``SequentialRotation`` or ``OrderedSplit``) makes each trial rotate through
+    ``FixedWorlds`` or ``OrderedSplit``) makes each trial rotate through
     the training worlds — the worker hot-swaps the Gazebo track between chunks
     via ``DeepRacerEnv.set_world`` (one container, no per-world restart).
     Held-out eval worlds (``OrderedSplit.eval_worlds``) are measured each
@@ -181,7 +201,7 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     container_experiment_path = _to_container_path(experiment_path, project_dir)
 
     # The world schedule comes from the strategy (custom one, or a
-    # SequentialRotation derived from experiment.worlds). It decides the
+    # FixedWorlds derived from experiment.worlds). It decides the
     # training order, the initial WORLD_NAME, and any held-out eval worlds.
     strategy = experiment.effective_strategy()
     chunks = strategy.training_chunks()
@@ -203,6 +223,12 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
         "MLFLOW_RUN_GROUP": experiment.name,
         "EXPERIMENT_PATH": container_experiment_path,
     }
+    # Forward GYM_DR_DEMO_* knobs so an env-driven experiment script (e.g.
+    # experiments/multicar_demo.py) rebuilds IDENTICALLY inside the container —
+    # otherwise the container defaults them and diverges from the host.
+    for _k, _v in os.environ.items():
+        if _k.startswith("GYM_DR_DEMO_"):
+            base_env[_k] = _v
     if experiment.training.rtf_override is not None:
         base_env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
     if experiment.seed is not None:
@@ -210,6 +236,25 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
         # reproducible per-seed runs (the container re-imports the script, so
         # the seed can't ride along on the experiment object — only via env).
         base_env["SEED"] = str(experiment.seed)
+    # Multi-car (N agents, one Gazebo): the sim launch reads GYM_DR_N_CARS to
+    # decide multicar + how many racecars to spawn; GYM_DR_CAMERAS lists which
+    # cars keep a camera (camera-off / feature obs for the rest). See
+    # gym_dr/envs/multi_car.py and docs/reports/multi-car.md.
+    n_cars = int(getattr(experiment, "n_cars", 1) or 1)
+    if n_cars > 1:
+        base_env["GYM_DR_N_CARS"] = str(n_cars)
+    if not getattr(experiment, "camera_obs", True):
+        base_env["GYM_DR_CAMERAS"] = ""   # no car renders a camera (feature obs)
+    # Friction DR (per-spawn): sample a μ-factor from the DR `friction` spec and set
+    # the wheel μ via GYM_DR_FRICTION_MU (the sim launch arg). Gazebo Classic has no
+    # runtime μ service, so friction varies per run/worker, not per episode. Baseline
+    # μ = 1.5 (racecar.gazebo); factor 1.0 = baseline.
+    _dr = getattr(experiment, "domain_randomization", None)
+    if _dr is not None and getattr(_dr, "has_friction", False):
+        import numpy as _np
+        from gym_dr.randomization import sample_spec as _sample
+        _rng = _np.random.default_rng(getattr(_dr, "seed", None))
+        base_env["GYM_DR_FRICTION_MU"] = f"{1.5 * _sample(_dr.friction, _rng):.4f}"
     ports: list[tuple[int, int]] | None = None
     if experiment.enable_gui:
         base_env["ENABLE_GUI"] = "True"
@@ -275,6 +320,23 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
             )
             continue
 
+        if rc == _SIM_RESTART_RC and restarts < max_restarts:
+            # Hang path (host watchdog killed a wedged-but-alive sim): the
+            # in-container trainer never wrote rotation_resume.json. Fall back to
+            # the newest checkpoint so the learned weights are preserved (the
+            # curriculum replays from the launch chunk — wasted compute, not lost
+            # progress). docs/reports/d3-hang-postmortem.md.
+            ckpt = _newest_checkpoint(artifacts_dir, experiment.name)
+            if ckpt is not None:
+                resume_from = ckpt
+                restarts += 1
+                print(
+                    f"[train] sim hang detected by watchdog; relaunching from newest "
+                    f"checkpoint {ckpt!r} [restart {restarts}/{max_restarts}]",
+                    flush=True,
+                )
+                continue
+
         print(f"[train] container {container_name} exited rc={rc}; aborting", flush=True)
         return None
 
@@ -325,7 +387,7 @@ def _spawn_workers(
         **extra_env,
     }
     # Multi-world HPO. When the strategy schedules more than one training chunk
-    # (a multi-world SequentialRotation, or an OrderedSplit with several
+    # (a multi-world FixedWorlds, or an OrderedSplit with several
     # train_worlds), put the worker into runtime track-rotation mode so EVERY
     # trial trains across the whole world schedule, hot-swapping the Gazebo
     # track between chunks via DeepRacerEnv.set_world (no container restart).

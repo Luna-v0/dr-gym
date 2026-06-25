@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from gym_dr.action_space import ActionSpaceConfig, ContinuousActionSpaceConfig
-from gym_dr.domain_randomization import DomainRandomizationConfig
+from gym_dr.domain_randomization import DomainRandomization
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
-from gym_dr.worlds import SequentialRotation, WorldStrategy
+from gym_dr.worlds import FixedWorlds, WorldStrategy
 
 if TYPE_CHECKING:
     from gym_dr.trainers.base import Trainer
@@ -245,9 +245,12 @@ class TraceConfig:
 
 
 def _default_env_factory():
-    from gym_dr.envs import time_trial
+    # The dispatcher routes on (n_cars, camera_obs); for the default
+    # (1, True) it is exactly time_trial, so existing single-car configs are
+    # unaffected. See gym_dr/envs/dispatch.py.
+    from gym_dr.envs import build_env
 
-    return time_trial
+    return build_env
 
 
 def _default_trainer():
@@ -354,15 +357,23 @@ class ExperimentConfig:
     """Optional world-scheduling strategy (``gym_dr.worlds``). When set it
     *supersedes* ``worlds``, deciding both the training world order and the
     (possibly held-out) evaluation worlds. ``None`` (default) falls back to a
-    :class:`~gym_dr.worlds.SequentialRotation` built from ``worlds`` — so
+    :class:`~gym_dr.worlds.FixedWorlds` built from ``worlds`` — so
     existing configs behave exactly as before. Use
     :class:`~gym_dr.worlds.OrderedSplit` to train on one ordered list and
     evaluate on another."""
 
-    domain_randomization: DomainRandomizationConfig | None = None
-    """Opt-in domain randomization — actuator/observation noise wrappers wired by
-    the env factory (see :class:`gym_dr.domain_randomization.DomainRandomizationConfig`).
-    Default None = no randomization. Targets environmental robustness (W-dr)."""
+    domain_randomization: DomainRandomization | None = None
+    """Opt-in domain randomization — ``DomainRandomization`` / ``ADR`` with
+    ``Range``/``Choice`` knobs (``gym_dr.domain_randomization``). Default None.
+    Prefer authoring via ``environment=EnvironmentConfig(domain_randomization=...)``."""
+
+    environment: "EnvironmentConfig | None" = None
+    """The new typed environment-building API (``gym_dr.environment.EnvironmentConfig``).
+    When set, its fields (observation→camera_obs, action_space, curriculum→world_strategy,
+    domain_randomization, object_avoidance, safe_rl→cost, n_cars, reward, eval_reward,
+    enable_gui) are unpacked into this config in ``__post_init__`` — so the env factory
+    and orchestrator read them as before. This is the preferred way to declare an
+    experiment; the flat fields remain the internal representation."""
 
     object_avoidance: ObjectAvoidanceConfig | None = None
     """Optional static-obstacle Object Avoidance settings. ``None`` (the
@@ -402,6 +413,23 @@ class ExperimentConfig:
     at start and fails fast with a clear message if the pieces don't line
     up, so misconfigurations crash on the host instead of mid-rollout."""
 
+    n_cars: int = 1
+    """Number of racecars to spawn in a **single** Gazebo world (multi-agent).
+    ``1`` (default) = the classic single-car env. ``> 1`` makes the env factory
+    build a ``MultiAgentDeepRacerEnv`` presented to SB3 as a ``VecEnv`` with
+    ``num_envs = n_cars`` — one physics step advances all cars, so the per-step
+    sim cost amortizes and PPO gets decorrelated parallel samples. All cars share
+    the world's track (one world = one track). See ``gym_dr/envs/multi_car.py``
+    and ``docs/reports/multi-car.md``."""
+
+    camera_obs: bool = True
+    """When ``True`` (default) the policy observes the grayscale camera (vision).
+    When ``False`` the policy observes a low-dim **feature vector** built from the
+    privileged ``reward_params`` (``gym_dr.perception.all_targets``) and the
+    camera is **not rendered** at all (much cheaper per step). Composable with
+    ``n_cars``: single/multi × camera/feature. The reward operates on
+    ``reward_params`` either way, so a reward/policy transfers across the two."""
+
     seed: int | None = None
     """Random seed plumbed everywhere we control:
 
@@ -418,18 +446,67 @@ class ExperimentConfig:
     even at a fixed seed — expect some run-to-run variance from the
     simulator regardless."""
 
+    def __post_init__(self) -> None:
+        """Unpack a composed ``environment`` into the flat fields the orchestrator
+        reads, so the new typed API and the legacy flat fields are one source of
+        truth. Frozen dataclass -> ``object.__setattr__``."""
+        env = self.environment
+        if env is None:
+            return
+        import dataclasses as _dc
+        from gym_dr.environment import FeatureObs
+        s = object.__setattr__
+        # Fill a flat field from ``environment`` ONLY where the caller left it at
+        # its dataclass default. ``dataclasses.replace`` (used by ``with_overrides``)
+        # re-runs ``__post_init__`` on every copy, so unconditional unpacking would
+        # silently clobber an explicit override — most damagingly the metrics-wrapped
+        # ``reward`` that ``install_metrics`` injects via ``with_overrides``. Without
+        # this guard the env runs the RAW reward, ``record_step`` never fires, and all
+        # ``dr/*`` metrics, the trace, and eval-path capture come back empty.
+        _fields = {f.name: f for f in _dc.fields(self)}
+
+        def _default(name: str) -> Any:
+            f = _fields[name]
+            if f.default is not _dc.MISSING:
+                return f.default
+            if f.default_factory is not _dc.MISSING:  # type: ignore[misc]
+                return f.default_factory()
+            return _dc.MISSING
+
+        def _fill(name: str, value: Any) -> None:
+            if getattr(self, name) == _default(name):
+                s(self, name, value)
+
+        _fill("action_space", env.action_space)
+        _fill("world_strategy", env.curriculum)
+        _fill("domain_randomization", env.domain_randomization)
+        _fill("object_avoidance", env.object_avoidance)
+        _fill("n_cars", env.n_cars)
+        _fill("reward", env.reward)
+        _fill("eval_reward", env.eval_reward)
+        _fill("enable_gui", env.enable_gui)
+        _fill("camera_obs", env.camera_obs)
+        if env.safe_rl is not None:
+            _fill("cost", env.safe_rl.cost)
+        # Feature-obs vector selection (dispatch reads GYM_DR_FEATURE_SET).
+        if isinstance(env.observation, FeatureObs):
+            from gym_dr.perception import ACTOR_FEATURES
+            import os
+            if tuple(env.observation.features) == tuple(ACTOR_FEATURES):
+                os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"
+
     def effective_strategy(self) -> WorldStrategy:
         """The world schedule actually used for this run.
 
         Returns ``world_strategy`` when set, else a
-        :class:`~gym_dr.worlds.SequentialRotation` derived from ``worlds`` —
+        :class:`~gym_dr.worlds.FixedWorlds` derived from ``worlds`` —
         so the strategy pattern is the single source of truth for world order
         and evaluation worlds, whether or not the user opted into a custom
         strategy.
         """
         if self.world_strategy is not None:
             return self.world_strategy
-        return SequentialRotation(
+        return FixedWorlds(
             names=list(self.worlds.names),
             chunk_steps=self.worlds.chunk_steps,
             rotations=self.worlds.rotations,
@@ -454,6 +531,8 @@ class ExperimentConfig:
                 "action_space_type": self.action_space.action_space_type,
             },
             "worlds": dataclasses.asdict(self.worlds),
+            "n_cars": self.n_cars,
+            "camera_obs": self.camera_obs,
             "world_strategy": (
                 _describe(self.world_strategy) if self.world_strategy is not None else None
             ),

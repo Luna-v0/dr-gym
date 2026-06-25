@@ -7,9 +7,12 @@ Project-specific terms first, then the RL / safe-RL vocabulary used across the d
 | Term | Meaning |
 |---|---|
 | **chunk / `chunk_steps`** | A contiguous block of training on one world before the next track swap. |
-| **rotation** | One full pass through the world list (`SequentialRotation`). |
+| **rotation** | One full pass through the world list (`FixedWorlds`). |
 | **world / track** | A Gazebo world. The first is loaded at container startup via `WORLD_NAME`; later ones via `DeepRacerEnv.set_world` (hot-swap, no restart). |
-| **world strategy** | The schedule object (`gym_dr/worlds.py`): `SequentialRotation` or `OrderedSplit`. |
+| **world strategy** | The schedule object (`gym_dr/worlds.py`): `FixedWorlds`, `OrderedSplit`, or `ACL`. (`FixedWorlds`=former `SequentialRotation`.) |
+| **ACL (Automatic Curriculum Learning)** | The adaptive world schedule (`gym_dr.worlds.ACL`, former `StochasticCurriculum`): spaced-repetition over an expanding track window. |
+| **EnvironmentConfig** | The single typed environment-building API (`gym_dr/environment.py`): composes `observation` (`CameraObs`/`FeatureObs`), `action_space`, `curriculum`, `domain_randomization`, `object_avoidance`, `safe_rl`, `n_cars`, `reward`. Held by `ExperimentConfig`. |
+| **Range / Choice** | DR value specs (`gym_dr/randomization.py`): `Range(low,high)` continuous-per-episode, `Choice([...])` discrete; a scalar = constant. |
 | **held-out world** | A world in `OrderedSplit.eval_worlds` not in `train_worlds`; used to measure generalization. |
 | **`phase`** | Trace column: `train` vs `eval` episode. Lets analysis separate the two. |
 | **`sim_time`** | The simulation clock (from `/clock`). The trace **join key**, not wall time (RTF drift desyncs wall clocks). |
@@ -38,7 +41,7 @@ Project-specific terms first, then the RL / safe-RL vocabulary used across the d
 | **cost signal** | The constrained quantity (candidates: off-track, crash, jerk, near-edge time). As load-bearing as the reward. |
 | **PPO-Lagrangian / PID-Lagrangian** | Constrained-PPO methods: a Lagrange multiplier on the cost, updated by dual ascent (PPO-Lag) or a PID controller (PID-Lag, damps oscillation). |
 | **curriculum learning** | Ordering tasks/tracks by difficulty (automatic: success-gated, or Prioritized Level Replay). Addresses **task/track generalization**. |
-| **domain randomization (DR) / ADR** | Randomizing sim parameters (noise, lighting, actuator drift); ADR expands the ranges as the agent succeeds. Addresses **environmental robustness**. |
+| **domain randomization (DR) / ADR** | Randomizing sim parameters (actuator noise, obs noise, **drag**, per-spawn **friction-μ**, random start/direction) via `Range`/`Choice` knobs (`DomainRandomization`); **ADR** (`gym_dr.domain_randomization.ADR`) widens the noise `Range`s as the agent succeeds. Addresses **environmental robustness**. |
 | **generalization gap** | mean train-track performance − mean held-out performance. The headline generalization metric. |
 | **task vs environmental robustness** | Two *separate* axes: track generalization (curriculum) vs sim-shift robustness (DR). Separate knobs, separate evaluation. |
 | **privileged / asymmetric actor-critic** | The critic may consume full sim state during training; the actor consumes only deployable features. Bridge to the real car. |

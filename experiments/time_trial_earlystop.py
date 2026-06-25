@@ -16,7 +16,7 @@ without leaving it*:
     run (status ``early_stopped``) instead of advancing.
 
 Because mastery is judged on the *current training track*, this uses
-``SequentialRotation`` (eval on the world being trained) rather than the
+``FixedWorlds`` (eval on the world being trained) rather than the
 ``OrderedSplit`` held-out split — "stay on this track ⇒ advance" is exactly the
 signal we want. Set ``MAX_OFFTRACK_RATE = 0.0`` (the default) to demand the car
 never leave the track across the eval episodes; raise it (e.g. ``0.5``) to
@@ -43,7 +43,7 @@ from gym_dr import (
     ContinuousActionSpaceConfig,
     ExperimentConfig,
     Sb3Trainer,
-    SequentialRotation,
+    FixedWorlds,
     TrackingConfig,
     TrainingConfig,
     anti_zigzag,
@@ -154,7 +154,7 @@ experiment = ExperimentConfig(
     # track between chunks. With no held-out eval set, each eval scores the
     # CURRENT training world, so the early-stop heuristic advances the moment the
     # car masters the track it is on.
-    world_strategy=SequentialRotation(
+    world_strategy=FixedWorlds(
         names=CURRICULUM,
         chunk_steps=CHUNK_STEPS,
         rotations=ROTATIONS,

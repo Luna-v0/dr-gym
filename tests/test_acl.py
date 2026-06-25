@@ -1,7 +1,7 @@
-"""Tests for the D5 StochasticCurriculum world strategy (anti-forgetting)."""
+"""Tests for the D5 ACL world strategy (anti-forgetting)."""
 from __future__ import annotations
 
-from gym_dr.worlds import StochasticCurriculum, WorldChunk
+from gym_dr.worlds import ACL, WorldChunk
 
 
 def _strat(**kw):
@@ -11,7 +11,7 @@ def _strat(**kw):
     kw.setdefault("n_chunks", 30)
     kw.setdefault("unlock_every", 3)
     kw.setdefault("seed", 0)
-    return StochasticCurriculum(**kw)
+    return ACL(**kw)
 
 
 def test_deterministic_plan():

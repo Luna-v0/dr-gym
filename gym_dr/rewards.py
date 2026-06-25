@@ -367,6 +367,107 @@ def clean_completion(params: dict) -> float:
 # Registry — for HPO sweep over reward variants.
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Reward search (2026-06-23) — the D3 baseline converged to "floor it, crash at
+# ~28%": speed pinned at max, 0 completions. Per AWS guidance, over-rewarding raw
+# speed backfires; the fix is to make staying-on-track / progress dominant and
+# reward speed only CONDITIONALLY (centered, aligned, not into a corner), letting
+# lap-pace pressure supply the "go fast" incentive. `make_weighted_reward`
+# exposes those terms as weights for an Optuna search (experiments/reward_search.py);
+# the named presets below seed it and the offline ranking (scripts/reward_ranking.py).
+# --------------------------------------------------------------------------- #
+def make_weighted_reward(
+    *,
+    w_center: float = 1.0,      # stay centered (1 - lateral^2)
+    w_speed: float = 0.5,       # speed, GATED by centered*aligned (no reckless speed)
+    w_corner: float = 0.5,      # penalty for speed carried INTO an upcoming corner
+    w_align: float = 0.3,       # heading aligned with the track tangent
+    w_pace: float = 0.3,        # progress/steps lap-pace term
+    w_steer: float = 0.2,       # penalty for sharp steering (anti-zigzag)
+    offtrack_penalty: float = OFFTRACK_STEP_PENALTY,
+):
+    """Build a stateless reward as a weighted sum of the load-bearing terms.
+
+    Speed is gated by ``centered*aligned`` so flooring it off-center or
+    mis-headed earns ~0 speed reward, and ``w_corner`` subtracts speed×curvature
+    so carrying speed into a bend is punished — directly targeting the D3
+    fast-crash mode. Off-track returns ``offtrack_penalty`` (terminal-ish)."""
+    from gym_dr.perception import _track_curvature_ahead, perception_targets
+
+    def reward(params: dict) -> float:
+        if not params.get("all_wheels_on_track", True) or params.get("is_offtrack", False):
+            return offtrack_penalty
+        f = perception_targets(params)
+        lateral, heading_err, _dl, _dr, speed_mps, _yaw = (float(x) for x in f)
+        # speed_mps is now raw m/s (un-normalised feature); the reward keeps its
+        # original [0,1] gating, so normalise locally by the action ceiling.
+        speed_norm = min(speed_mps / 4.0, 1.0)
+        centered = 1.0 - lateral ** 2            # 1 center -> 0 edge
+        aligned = 1.0 - abs(heading_err)         # 1 aligned -> 0 perpendicular
+        curve = abs(_track_curvature_ahead(params))  # 0 straight -> 1 sharp bend
+        steps = max(int(params.get("steps", 1) or 1), 1)
+        pace = float(params.get("progress", 0.0)) / steps
+        steer = abs(float(params.get("steering_angle", 0.0))) / 30.0
+        r = (w_center * centered
+             + w_align * aligned
+             + w_speed * speed_norm * centered * aligned   # gated speed
+             - w_corner * speed_norm * curve               # speed-into-corner penalty
+             + w_pace * pace
+             - w_steer * steer)
+        return float(r)
+
+    return reward
+
+
+def make_progress_reward(
+    *, step_penalty: float = 0.3, completion_bonus: float = 100.0,
+    offtrack_penalty: float = OFFTRACK_STEP_PENALTY, center_bonus: float = 0.1,
+):
+    """Progress-DELTA reward: total return ≈ (progress completed) − step_penalty·steps
+    (+ completion_bonus). Bounded per lap (a lap is worth ~100 regardless of speed)
+    so it has NO crawl trap, and the per-step time cost rewards finishing *fast*.
+
+    Stateful (closes over the previous progress) — detects the per-episode reset
+    when ``progress`` drops. dr-gym trains a single env so the closure is safe;
+    HPO workers each build their own instance. ``center_bonus`` adds a small
+    dense centering term so early learning (before any progress) still has signal."""
+    from gym_dr.perception import perception_targets
+
+    state = {"prev": 0.0}
+
+    def reward(params: dict) -> float:
+        prog = float(params.get("progress", 0.0))
+        if prog < state["prev"] - 1.0:        # progress dropped ⇒ new episode
+            state["prev"] = 0.0
+        if not params.get("all_wheels_on_track", True) or params.get("is_offtrack", False):
+            state["prev"] = 0.0
+            return offtrack_penalty
+        delta = max(prog - state["prev"], 0.0)
+        state["prev"] = prog
+        lateral = float(perception_targets(params)[0])
+        r = delta - step_penalty + center_bonus * (1.0 - lateral ** 2)
+        if prog >= 99.999:
+            r += completion_bonus
+        return float(r)
+
+    return reward
+
+
+# Named presets seeding the search (each a sensible point in the weight space).
+centered_speed = make_weighted_reward(w_speed=0.6, w_corner=0.3, w_align=0.3, w_pace=0.2)
+"""Speed gated by centeredness+alignment — discourages reckless cornering speed."""
+corner_aware = make_weighted_reward(w_speed=0.5, w_corner=0.8, w_align=0.4, w_pace=0.2)
+"""Heavily penalize speed carried into corners; fast on straights."""
+survive_first = make_weighted_reward(w_center=1.5, w_speed=0.2, w_corner=0.5, w_pace=0.4)
+"""Survival/centering dominant, minimal speed reward; pace supplies the urgency."""
+progress_complete = make_progress_reward(step_penalty=0.3, completion_bonus=100.0)
+"""Progress-delta + time-penalty + completion bonus — no crawl trap, rewards fast laps."""
+
+for _r, _n in ((centered_speed, "centered_speed"), (corner_aware, "corner_aware"),
+               (survive_first, "survive_first"), (progress_complete, "progress_complete")):
+    _r.__name__ = _n  # so archival / introspection names them
+
+
 REWARD_VARIANTS: dict = {
     "center_line": center_line,
     "progress_and_speed": progress_and_speed,
@@ -375,6 +476,11 @@ REWARD_VARIANTS: dict = {
     "anti_zigzag": anti_zigzag,
     "waypoint_anticipation": waypoint_anticipation,
     "object_avoidance_aware": object_avoidance_aware,
+    # reward-search candidates (2026-06-23)
+    "centered_speed": centered_speed,
+    "corner_aware": corner_aware,
+    "survive_first": survive_first,
+    "progress_complete": progress_complete,
 }
 """Name -> callable map. Used by HPO to sample a training reward via Optuna
 ``suggest_categorical`` (which only accepts hashable scalars, not function

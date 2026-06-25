@@ -15,6 +15,7 @@ from gym_dr.trainers.sb3.algorithms import load_model, make_model
 from gym_dr.trainers.sb3.callbacks import (
     CtxCheckpointCallback,
     CtxEvalCallback,
+    HeartbeatCallback,
     MlflowMirrorCallback,
     MultiWorldEvalCallback,
     RewardMetricsCallback,
@@ -230,6 +231,9 @@ class Sb3Trainer:
             ),
             MlflowMirrorCallback(),
             RewardMetricsCallback(),
+            # Touch $GYM_DR_HEARTBEAT so the host watchdog can distinguish a
+            # wedged-but-alive sim (hang) from real progress (d3-hang-postmortem).
+            HeartbeatCallback(),
         ]
         if ctx.training.max_train_seconds is not None:
             wall_clock_callback = WallClockLimitCallback(

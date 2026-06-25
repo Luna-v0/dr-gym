@@ -187,3 +187,72 @@ def test_waypoint_anticipation_uses_track_geometry():
     ))
     # On a turn ahead, slowing down should be rewarded.
     assert slow > fast
+
+
+# --- Reward-search candidates (2026-06-23) --------------------------------- #
+from gym_dr.rewards import (  # noqa: E402
+    OFFTRACK_STEP_PENALTY,
+    centered_speed,
+    corner_aware,
+    make_progress_reward,
+    make_weighted_reward,
+    progress_complete,
+    survive_first,
+)
+
+
+def test_new_rewards_offtrack_penalty():
+    off = {"all_wheels_on_track": False, "is_offtrack": True}
+    for fn in (centered_speed, corner_aware, survive_first, progress_complete):
+        assert fn(off) == OFFTRACK_STEP_PENALTY
+
+
+def test_weighted_reward_gates_speed_by_centeredness():
+    # Same high speed, centered+aligned should out-reward off-center+misaligned.
+    r = make_weighted_reward(w_speed=1.0, w_center=1.0, w_align=0.5, w_corner=0.0, w_pace=0.0)
+    centered = r(_full_params(distance_from_center=0.02, heading=0.0, speed=4.0))
+    reckless = r(_full_params(distance_from_center=0.45, heading=25.0, speed=4.0))
+    assert centered > reckless
+
+
+def test_weighted_reward_penalizes_speed_into_corner():
+    # A sharp left bend ahead; high speed should reward less than low speed.
+    wps = [(0.0, 0.0), (1.0, 0.0), (1.8, 0.6), (2.2, 1.5), (2.3, 2.5), (2.3, 3.5)]
+    r = make_weighted_reward(w_corner=1.0, w_speed=0.5, w_center=0.5, w_align=0.0, w_pace=0.0)
+    fast = r(_full_params(waypoints=wps, closest_waypoints=[0, 1], heading=0.0, speed=4.0))
+    slow = r(_full_params(waypoints=wps, closest_waypoints=[0, 1], heading=0.0, speed=1.0))
+    assert slow > fast
+
+
+def test_progress_reward_has_no_crawl_trap():
+    """A fast full lap must out-score a slow full lap (more steps) — the property
+    the centerline rewards lack (scripts/reward_ranking.py)."""
+    r = make_progress_reward(step_penalty=0.3, completion_bonus=100.0, center_bonus=0.1)
+
+    def lap_return(n_steps):
+        r2 = make_progress_reward(step_penalty=0.3, completion_bonus=100.0, center_bonus=0.1)
+        total = 0.0
+        for i in range(n_steps):
+            total += r2(_full_params(progress=100.0 * (i + 1) / n_steps, steps=i + 1,
+                                     distance_from_center=0.03))
+        return total
+
+    fast_lap = lap_return(60)
+    slow_lap = lap_return(180)
+    assert fast_lap > slow_lap
+
+
+def test_progress_reward_completion_bonus_fires():
+    r = make_progress_reward(completion_bonus=100.0)
+    # below completion: no bonus; at completion: bonus added
+    below = r(_full_params(progress=98.0, steps=50))
+    r2 = make_progress_reward(completion_bonus=100.0)
+    done = r2(_full_params(progress=100.0, steps=50))
+    assert done > below + 50.0  # the bonus clearly dominates
+
+
+def test_all_variants_return_finite():
+    import math as _m
+    for name, fn in REWARD_VARIANTS.items():
+        v = fn(_full_params())
+        assert isinstance(v, float) and _m.isfinite(v), name

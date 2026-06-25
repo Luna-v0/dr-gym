@@ -10,7 +10,7 @@ performance-adaptive, …) drop in without touching them.
 
 Two strategies ship today:
 
-- :class:`SequentialRotation` — the historical behaviour: one ordered list,
+- :class:`FixedWorlds` — the historical behaviour: one ordered list,
   repeated ``rotations`` times; evaluation runs on whatever world training is
   currently on (``evaluation_worlds()`` is empty).
 - :class:`OrderedSplit` — train on one ordered list, **evaluate on a different
@@ -71,10 +71,10 @@ class WorldStrategy(ABC):
 
 
 @dataclass(frozen=True)
-class SequentialRotation(WorldStrategy):
+class FixedWorlds(WorldStrategy):
     """Train through ``names`` in order, ``rotations`` times. The default.
 
-    ``SequentialRotation(["A", "B"], chunk_steps=20_000, rotations=2)`` trains
+    ``FixedWorlds(["A", "B"], chunk_steps=20_000, rotations=2)`` trains
     A→B→A→B, 20k steps each. ``evaluation_worlds()`` is empty, so evaluation
     uses the current training world (matching the original pipeline).
     """
@@ -135,7 +135,7 @@ class OrderedSplit(WorldStrategy):
 
 
 @dataclass(frozen=True)
-class StochasticCurriculum(WorldStrategy):
+class ACL(WorldStrategy):
     """Spaced-repetition curriculum: sample each chunk's track from an expanding
     window, favouring newer tracks but **always** keeping a chance of revisiting
     older ones — to fight the catastrophic forgetting a strict sequential
@@ -175,7 +175,7 @@ class StochasticCurriculum(WorldStrategy):
         if isinstance(self.eval_worlds, str):
             object.__setattr__(self, "eval_worlds", [self.eval_worlds])
         if not self.train_worlds:
-            raise ValueError("StochasticCurriculum needs at least one train world")
+            raise ValueError("ACL needs at least one train world")
         if self.n_chunks < 1:
             raise ValueError("n_chunks must be >= 1")
         if self.recency_weight <= 0:

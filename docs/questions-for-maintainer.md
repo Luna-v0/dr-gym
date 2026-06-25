@@ -32,7 +32,8 @@ answered 2026-06-21** — current state below. New questions get added as I hit 
 
 - [x] **Car SSH baseline (D6):** done — Pi4 aarch64, Ubuntu 24.04, no inference runtime
   (`docs/reports/car-baseline.md`). On-car benchmarking is blocked on **D8** + confirm-before-install.
-- [ ] **Safety-Gym experiments (new):** validate the `deepracer-env` safety-gym branch + add experiments.
+- [x] **Safety-Gym experiments (new):** FSRL PPO-Lag **validated** on `SafetyPointGoal1` (reward↑ to 17.5,
+  cost↓ to 9 ≤ limit 10) — `docs/reports/safe-rl-backend.md`. DeepRacer constrained run gated on D3's budget.
 - [ ] **D7 evaluator run:** needs a trained model → after D3.
 - [ ] **D4 throughput sweep + N-cars-in-one-world spec.**
 - [ ] **D3 validation training run (LAST):** launch + monitor real rtf/fps vs set; ≥ ~30 min before reading.
@@ -53,11 +54,15 @@ OpenVINO** now (both run the ONNX), is thermally paced (cooldown + temp guard be
 `engine_benchmark.json`. **TFLite/ExecuTorch** need converted models — I'll generate + push `agent.tflite` /
 `agent.pte` next so they join the comparison.
 
-### D9 ✅ `[DISS]` Safe-RL backend → **adopt FSRL `PPOLagAgent`** (PID-Lagrangian PPO)
+### D9 ✅ `[DISS]` Safe-RL backend → **adopt FSRL `PPOLagAgent`** (PID-Lagrangian PPO) — **VALIDATED**
 **Resolved (2026-06-22):** maintainer chose FSRL (PID + PPO-Lagrangian joined, turnkey). Built:
 `CostInfoWrapper` (cost→`info["cost"]`), `FsrlTrainer` scaffold, `scripts/validate_fsrl_safetygym.py`.
-Next (gated on FSRL install in a separate venv + a run): validate on Safety-Gymnasium → finalize the
-Tianshou CNN for camera obs → DeepRacer constrained run with `cost_limit` from empirical `dr/ep_mean_cost`.
+**Validated (2026-06-22):** FSRL PPO-Lag runs end-to-end on `SafetyPointGoal1-v0` in a separate
+`.venv-safe` (**Python 3.10** — 3.11 can't build safety-gymnasium's pinned pygame 2.1.0) and shows correct
+constrained behaviour (cost driven under the limit while reward re-balances). Fixed one bug: Safety-Gym's
+CMDP **6-tuple** → a `_CostToInfo` wrapper (`info["cost"]`, same contract as our `CostInfoWrapper`). Full
+write-up: `docs/reports/safe-rl-backend.md`. Next: finalize the Tianshou camera CNN + asymmetric cost-critic
+→ DeepRacer constrained run with `cost_limit` from empirical `dr/ep_mean_cost` (D3 logging it now).
 Original analysis ↓
 **Recommendation (2026-06-22, `docs/reports/safe-rl-backend.md`):** OmniSafe would NOT make our custom-CNN
 architecture changes cleaner — it'd re-port the whole stack into its abstractions. Proposed **hybrid**:

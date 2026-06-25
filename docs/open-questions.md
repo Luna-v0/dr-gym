@@ -27,19 +27,76 @@ doesn't scale; training is **inference-device-bound, not render-bound** (CUDA �
 same speed ⇒ GPU passthrough for rendering is unnecessary); the **Pi runs even a 24 M-param net in ~35 ms,
 <200 MB** — memory is not the constraint, latency is; **onnxruntime** beats OpenVINO-ARM on the Pi.
 
-**Running:** D3 held-out validation (GPU/CUDA, ~20 h).
+**Maintainer-set objective (2026-06-22):** the first real target is an **end-to-end PURE-PPO** run
+(architecture + Domain Randomization + curriculum, **no Lagrangian**) — but **train the feature-distillation
+perception model first**, supervised on sim data. Sequencing (maintainer chose **let D3 finish first**):
+1. **D3 runs to completion** = the pure-PPO + curriculum **no-DR baseline** (the clean ablation point).
+2. **Phase 1** — collect sim data (`scripts/collect_perception_all.sh`, 8 worlds, DR-perturbed inputs +
+   ground-truth labels) → fit `PerceptionNet` (`experiments/train_perception.py`) → per-feature MAE table.
+3. **Phase 2** — `experiments/end_to_end_ppo.py` (D3 config + `DomainRandomizationConfig(adr=True)`),
+   optionally with the perception net as the actor front-end (decided from the MAE). **All scripts READY.**
 
-**Queue (no input needed):** **ADR ✅ built** (auto DR — `docs/reports/domain-randomization.md`; validation
-run pending); the **cost-logging ✅ built** (empirical budget); the **trainer contract ✅ built**
-(`docs/trainer-contract.md`); the
-**deepracer-env edits** (`sim_time` exposure, random-start/direction, episode-lifecycle config — signed
-off); **FSRL PPOLag backend** (D9 ✅ — scaffold + cost→info bridge + Safety-Gym validation built; validate
-in a separate venv, then finalize the Tianshou CNN); **deepracer-utils** compat +
-chart port; TFLite/ExecuTorch + **int8 quant** on the Pi; **software-render multi-instance + N-cars**
-throughput sweeps (need a free GPU); **perception net** + asymmetric critic (W-perception); the
+**Feature-based-policy decomposition (maintainer, 2026-06-22 — `docs/reports/feature-based-policy.md`):** split
+the system at the feature vector — `π(features)` is state-based (sim==real by construction), `g(camera)→features`
+is the **only** sim2real-sensitive part. Two added tests (backlog, gated on Phase 1):
+**Test 1** oracle-feature PPO (train on ground-truth `ALL_FEATURES` → is the feature set sufficient? + the
+teacher; train π with feature-noise calibrated to g's MAE), **Test 2** `π(g(camera))` = the perception
+penalty. Enabling helper `enrich_reward_params` (derived features as reward-fn args / feature obs) built+tested.
+
+**Running (2026-06-23):** the **reward search** (`experiments/reward_search.py`, Optuna, 16 trials × 500k
+steps, 2 workers, ~20 h) — protected by the new **liveness watchdog** (`docs/reports/d3-hang-postmortem.md`,
+built + tested; D3's hang can no longer stall a run). Searches the progress-normalized reward families
+(offline filter narrowed the space — `docs/reports/reward-search.md`).
+
+**Planned next experiment (chained):** when the search finishes, run **Phase 2**
+(`experiments/phase2_from_search.py`) — it loads the **best reward** from the study and runs the full 4M-step
+end-to-end PPO with it **+ DR/ADR + random valid-start** (the patched sim via `GYM_DR_DEEPRACER_ENV_SRC`).
+Rationale: the offline filter showed the fast-crash is partly an *optimization* problem, so the fix is the
+*combination* — best reward (search) **plus** DR/random-start (state coverage to learn cornering). Script is
+built + import-verified; launches on one command when the search completes.
+
+**D3 outcome (closed):** ran to 3.5M/4M then **hung** (gzserver wedged during the held-out eval world-swap;
+recovery only caught *crashes*, not *hangs* — now fixed by the watchdog). Baseline verdict conclusive: pure
+PPO + curriculum, no DR ⇒ fast-crash (~28% progress, 0 completions).
+
+**Built while D3 runs (2026-06-22):**
+- **deepracer-env random valid-start + random direction** (`RANDOM_START`/`RANDOM_DIRECTION` reset modes) —
+  env code + `time_trial.py` wiring + enabled in `end_to_end_ppo.py`. **Deployed via bind-mount**
+  (`GYM_DR_DEEPRACER_ENV_SRC`, `gym_dr/docker_runner.py`) — no image rebuild needed, validated in the base
+  image. (Multi-view/contrastive SSL dropped — maintainer chose supervised-only.)
+- **Rosbag→perception join core** (`scripts/bag_to_perception.py` + 7 tests). Precondition found: the trace
+  must be extended with the derived `ALL_FEATURES` columns (task #18) since it lacks `is_left_of_center`/
+  `waypoints` to recompute labels offline.
+
+**Done today (2026-06-22):**
+- **FSRL PPO-Lag VALIDATED on Safety-Gymnasium** (`.venv-safe`, Py3.10, 20 epochs): reward↑ to **17.5** with
+  cost↓ to **9.0 ≤ limit 10** — the ideal CMDP outcome ⇒ D9 backend trusted. Fixed the integration bug:
+  Safety-Gym's CMDP **6-tuple** → a `_CostToInfo` wrapper (the **same `info["cost"]` contract** as our
+  DeepRacer `CostInfoWrapper`). `FsrlTrainer` finalized with verified kwargs + a real CNN camera path
+  (`PPOLagrangian` policy + Tianshou CNN `preprocess_net` + separate reward/cost critics).
+- **Software-render multi-instance throughput sweep:** **2-worker sweet spot ~83 steps/s (+50%)** with
+  sw-render+GPU-inference; 4 workers collapse (CPU oversubscription). First lever to beat the single-instance
+  ceiling — `docs/reports/throughput.md`.
+- **W-perception built** (`gym_dr/perception.py` net + `perception_targets`, `scripts/collect_perception_data.py`,
+  `experiments/train_perception.py`, `tests/test_perception.py` 17✅) — `docs/reports/perception.md`.
+- **Asymmetric architecture feature study** (`docs/reports/asymmetric-architecture.md`): the
+  deployable/privileged partition is now concrete code — `perception_targets` (actor, 6) vs `privileged_state`
+  (critic-only extras: progress, curvature-ahead, object/contact flags, 6) vs `critic_state` (concat, 12);
+  distinguishes asymmetric-AC (Pinto) from teacher→student distillation (Learning-by-Cheating); notes
+  speed/yaw are *proprioceptive* (stay on the actor).
+- **W-dash:** track-overlay images already render to TB with **true route `.npy` borders**
+  (`test_eval_path_plots_logged_as_tb_images` ✅); added the live **`eval/generalization_gap`** +
+  `eval/train_clean_completion_rate` scalars in `MultiWorldEvalCallback` (one extra train-world eval).
+
+**Queue (no input needed):** **ADR ✅ built**; **cost-logging ✅ built**; **trainer contract ✅ built**;
+**deepracer-env edits** (`sim_time` exposure, random-start/direction, episode-lifecycle — signed off);
+finalize the **FSRL Tianshou CNN** for camera obs + DeepRacer constrained run (gated on D3's `dr/ep_mean_cost`);
+**deepracer-utils** compat + chart port; TFLite/ExecuTorch + **int8 quant** on the Pi; **N-cars-in-one-world**
+throughput sweep; **perception data collection + supervised fit** (need a free Gazebo); the
 **`deepracer-deploy`** repo (on-car node + ServoCtrlMsg rescale + watchdog, ADR-0001).
 
-**Open decision:** **D9** — safe-RL backend (hybrid vs full OmniSafe), see `docs/questions-for-maintainer.md`.
+**Open decision:** none blocking — **D9 resolved** (FSRL PPO-Lag, validated). Next maintainer touchpoint is
+after D3 + FSRL Safety-Gym finish (read the generalization gap + the cost budget).
 
 ## Active questions
 
@@ -74,6 +131,10 @@ throughput sweeps (need a free GPU); **perception net** + asymmetric critic (W-p
   defaults (`is_continuous`, `number_of_trials`, `MAX_STEPS`, `CHANGE_START`). Unverified empirically.
 - **Next:** instrument episode endings in W1/W2; confirm `terminated` vs `truncated` semantics flow
   correctly into SB3's value bootstrapping.
+- **2026-06-23 update:** the D3 hang (`docs/reports/d3-hang-postmortem.md`) shows the *cost* of having no
+  explicit episode cap — a never-terminating eval episode on a long track can stall the run. Defaults are
+  `MAX_STEPS=10000` (deepracer-env); add an explicit, smaller **eval step cap** as defense in depth (tracked
+  with the liveness-watchdog fix).
 
 ### Q4 🔴 `[DISS]` Safe-RL cost signal definition
 - **Known:** the 26-key `reward_params` (`deepracer-env .../agent_ctrl/constants.py:RewardParam`) offers

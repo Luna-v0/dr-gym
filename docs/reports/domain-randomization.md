@@ -3,17 +3,53 @@
 DR targets **environmental robustness** — a *separate* axis from track generalization (curriculum). Two
 knobs: static randomization (done) and **automatic** (ADR, not yet built).
 
+> ## API UPDATE — 2026-06-24 (Range/Choice + ADR + drag + friction)
+> The flat `DomainRandomizationConfig(actuator_steering_std=..., adr=True, ...)` API was **replaced** (clean
+> break) by typed value-specs and an `ADR` subclass. Authoring now goes through `EnvironmentConfig`
+> (`gym_dr/environment.py`):
+> ```python
+> from gym_dr import EnvironmentConfig, FeatureObs, ACL, ADR, Range, Choice
+> EnvironmentConfig(
+>     observation=FeatureObs(),                     # or CameraObs()
+>     curriculum=ACL(train_worlds=[...], eval_worlds=[...]),   # ACL = the former StochasticCurriculum
+>     domain_randomization=ADR(                      # ADR(...) static-knob base = DomainRandomization
+>         steering_noise=Range(0, 3), speed_noise=Range(0, 0.15),   # was actuator_*_std (Range high = old ceiling)
+>         obs_gaussian=Range(0, 10), obs_brightness=Range(0, 0.2),
+>         drag=Range(0.7, 1.0),         # per-episode throttle->speed factor (sim2real); 1.0 = off
+>         friction=Range(0.8, 1.5),     # per-SPAWN wheel-mu multiplier (Gazebo has no runtime mu service)
+>         random_start=True, random_direction=True,
+>         step=0.1, promote=0.7, demote=0.3, seed=42))
+> ```
+> - **Value specs** (`gym_dr/randomization.py`): `Range(low, high)` (continuous, per-episode), `Choice([...])`
+>   (discrete list), or a bare scalar (constant). `sample_spec` / `spec_bounds` helpers.
+> - **`ADR`** widens each **noise** knob's `Range` cur_high from `low`→`high` as held-out clean-completion
+>   clears `promote` (shrinks ≤ `demote`); logs `adr/<knob>_high`. `drag`/`friction` sample their full Range
+>   each spawn/episode (their easy anchor is 1.0, not 0, so naive widening is a follow-up).
+> - **`drag`** = `DragRandomization` action wrapper (per-episode speed scaling). **`friction`** = per-spawn
+>   wheel μ via the `friction_mu` xacro/launch arg ← `GYM_DR_FRICTION_MU` (dr-gym `app.py` samples it);
+>   per-EPISODE μ needs a Gazebo plugin (deepracer-env has no runtime surface-μ service — documented limit).
+> - The old flat fields still exist *internally* on `ExperimentConfig` (the env factory reads them); the
+>   authoring API is `EnvironmentConfig`. See `tests/test_environment.py` + `test_domain_randomization.py`.
+> The historical design notes below use the pre-refactor names.
+
 ## Done — static DR
 - `ActuatorNoise` (Gaussian on steering/speed, engineering units, applied before the action clip) and
   `ObservationNoise` (camera additive Gaussian + per-step brightness jitter) wrappers
   (`gym_dr/envs/wrappers.py`), opt-in via `DomainRandomizationConfig`, wired in the `time_trial` factory,
   unit-tested (`tests/test_domain_randomization.py`). On `main`.
 
-## Pending — episode-reset DR (env-side; signed off, image-gated)
-- **Random valid-start:** a `deepracer-env` reset change to sample `start_ndist` from `np_random` each reset
-  (today only deterministic round-robin `CHANGE_START` / alternation `ALT_DIR` exist).
-- **Random direction** per episode.
-These ship with the deepracer-env edits batch (also `sim_time` exposure + episode-lifecycle config).
+## Episode-reset DR (env-side) — BUILT 2026-06-22
+- **Random valid-start + random direction** are now implemented in `deepracer-env`: the `RANDOM_START` /
+  `RANDOM_DIRECTION` controller-config modes (`agent_ctrl/constants.py`, `rollout_agent_ctrl.py:finish_episode`)
+  sample a uniform normalized start distance along the centerline (any `ndist∈[0,1)` is a valid on-track pose)
+  and/or a random direction each training episode, taking precedence over the deterministic `CHANGE_START`
+  round-robin / `ALT_DIR` alternation. Uses a dedicated seeded RNG; `.get(...,False)` defaults keep old configs
+  unchanged. `gym_dr/envs/time_trial.py` passes them through when `DomainRandomizationConfig.random_start/
+  random_direction` are set; `experiments/end_to_end_ppo.py` enables both.
+- **Deployment (no image rebuild needed):** bind-mount the local checkout over the container's package via
+  `GYM_DR_DEEPRACER_ENV_SRC` (`gym_dr/docker_runner.py`) — validated: the patched `RANDOM_START`/`RANDOM_DIRECTION`
+  load in the base image. (Proper long-term fix = rebuild the base sim image from deepracer-env source.)
+- Still pending in the env-edits batch: `sim_time` exposure + episode-lifecycle config.
 
 ## ADR — Automatic Domain Randomization (BUILT)
 **Implemented (2026-06-22):** `ADRController` + mutable `ADRState` (`gym_dr/domain_randomization.py`),

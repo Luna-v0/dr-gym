@@ -28,7 +28,9 @@ from gym_dr.config import (
     load_search_space,
 )
 from gym_dr.envs import time_trial
-from gym_dr.domain_randomization import DomainRandomizationConfig
+from gym_dr.domain_randomization import ADR, DomainRandomization
+from gym_dr.environment import CameraObs, EnvironmentConfig, FeatureObs, SafeRL
+from gym_dr.randomization import Choice, Range
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
 from gym_dr.seeding import ReplicateSeeds, SeedManager
 from gym_dr.rewards import (
@@ -47,8 +49,8 @@ from gym_dr.tracks import ALL_TRACKS, TRACKS, display_name, existing_tracks
 from gym_dr.trainers import Sb3Trainer, Trainer, TrainingContext, TrainResult
 from gym_dr.worlds import (
     OrderedSplit,
-    SequentialRotation,
-    StochasticCurriculum,
+    FixedWorlds,
+    ACL,
     WorldChunk,
     WorldStrategy,
 )
@@ -58,7 +60,14 @@ __all__ = [
     "ContinuousActionSpaceConfig",
     "DiscreteAction",
     "DiscreteActionSpaceConfig",
-    "DomainRandomizationConfig",
+    "DomainRandomization",
+    "ADR",
+    "EnvironmentConfig",
+    "CameraObs",
+    "FeatureObs",
+    "SafeRL",
+    "Range",
+    "Choice",
     "ExperimentConfig",
     "ObjectAvoidanceConfig",
     "ReplicateSeeds",
@@ -69,8 +78,8 @@ __all__ = [
     "TrackingConfig",
     "Trainer",
     "OrderedSplit",
-    "SequentialRotation",
-    "StochasticCurriculum",
+    "FixedWorlds",
+    "ACL",
     "WorldChunk",
     "WorldStrategy",
     "TrainingConfig",

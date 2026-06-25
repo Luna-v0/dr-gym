@@ -18,3 +18,6 @@ venv/
 
 .deepracer-env-upstream/
 .claude/
+
+# run logs
+logs/
