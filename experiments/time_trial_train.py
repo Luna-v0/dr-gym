@@ -192,7 +192,7 @@ experiment = ExperimentConfig(
     ),
     tracking=TrackingConfig(mlflow_experiment=NAME),
     # Watch the car train over VNC: connect a client to vnc://localhost:5900.
-    #enable_gui=True,
+    enable_gui=True,
     seed=42,
     use_gpu=True,
 )

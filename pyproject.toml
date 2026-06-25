@@ -75,6 +75,17 @@ optimize = [
   "tf2onnx>=1.16",
 ]
 
+[tool.uv]
+# `dev` and `optimize` are mutually exclusive: onnxscript (dev) needs
+# typing-extensions>=4.10, while tensorflow~=2.13 (optimize) caps it <4.6.
+# They were never meant to share an env — optimize lives in its own venvs
+# (see the comment on the optimize group above). Declaring the conflict lets
+# uv resolve them in separate forks so the universal lock succeeds and
+# `uv run` (default `dev` group only) works.
+conflicts = [
+  [{ group = "dev" }, { group = "optimize" }],
+]
+
 [tool.uv.sources]
 # Install deepracer-utils from the project owner's GitHub. Pin a branch so
 # `uv lock` records the resolved commit; switch `branch` to `rev = "<sha>"` to
