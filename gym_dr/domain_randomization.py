@@ -46,6 +46,11 @@ class DomainRandomization:
     speed_noise: ParamSpec = 0.0        # m/s  (1–4 speed range)
     obs_gaussian: ParamSpec = 0.0       # 0–255 grayscale additive
     obs_brightness: ParamSpec = 0.0     # per-step multiplicative fraction
+    obs_contrast: ParamSpec = 0.0       # per-step contrast jitter around mid-gray
+    obs_gamma: ParamSpec = 0.0          # per-step gamma (luminance curve) jitter
+    feature_noise: ParamSpec = 0.0      # additive Gaussian on the FEATURE obs vector
+                                        # (camera-off path) — actor-robustness DR; the
+                                        # asymmetric critic still sees the TRUE vector
     drag: ParamSpec = 1.0               # throttle→speed factor (e.g. Range(0.7,1.0))
     friction: ParamSpec = 1.0           # wheel-μ multiplier (Range or Choice of surfaces)
     random_start: bool = False
@@ -58,8 +63,13 @@ class DomainRandomization:
         return spec_bounds(self.steering_noise)[1] > 0 or spec_bounds(self.speed_noise)[1] > 0
 
     @property
+    def has_feature_noise(self) -> bool:
+        return spec_bounds(self.feature_noise)[1] > 0
+
+    @property
     def has_obs_noise(self) -> bool:
-        return spec_bounds(self.obs_gaussian)[1] > 0 or spec_bounds(self.obs_brightness)[1] > 0
+        return (spec_bounds(self.obs_gaussian)[1] > 0 or spec_bounds(self.obs_brightness)[1] > 0
+                or spec_bounds(self.obs_contrast)[1] > 0 or spec_bounds(self.obs_gamma)[1] > 0)
 
     @property
     def has_drag(self) -> bool:

@@ -41,12 +41,21 @@ def feature_time_trial(experiment: "ExperimentConfig") -> Any:
     env = time_trial(dataclasses.replace(experiment, reward=_tap))
     # GYM_DR_FEATURE_SET=actor_extended -> the 11-feature actor vector (9 ⊕
     # curvature_ahead, nearest_object_dist); default keeps the validated 9.
+    # feature_noise (DR) perturbs the actor's vector; GYM_DR_ASYM_CRITIC=1 makes the
+    # obs a Dict{actor:noised, critic:true} for the asymmetric value net.
     import os
+    from gym_dr.randomization import spec_bounds
+    dr = getattr(experiment, "domain_randomization", None)
+    fnoise = spec_bounds(getattr(dr, "feature_noise", 0.0))[1] if dr is not None else 0.0
+    asym = os.getenv("GYM_DR_ASYM_CRITIC") == "1"
+    seed = getattr(dr, "seed", None) if dr is not None else None
     if os.getenv("GYM_DR_FEATURE_SET") == "actor_extended":
         from gym_dr.perception import ACTOR_FEATURES, actor_targets
         return FeatureObsWrapper(env, lambda: captured,
-                                 features=ACTOR_FEATURES, targets_fn=actor_targets)
-    return FeatureObsWrapper(env, lambda: captured)
+                                 features=ACTOR_FEATURES, targets_fn=actor_targets,
+                                 feature_noise=fnoise, asymmetric=asym, seed=seed)
+    return FeatureObsWrapper(env, lambda: captured,
+                             feature_noise=fnoise, asymmetric=asym, seed=seed)
 
 
 def build_env(experiment: "ExperimentConfig") -> Any:

@@ -210,20 +210,48 @@ class DragRandomization(gym.ActionWrapper):
         return a
 
 
+def apply_image_jitter(img, rng, *, gaussian_std: float = 0.0, brightness: float = 0.0,
+                       contrast: float = 0.0, gamma: float = 0.0):
+    """Photometric DR on a uint8 image — brightness, contrast, gamma, Gaussian.
+
+    All knobs are symmetric magnitudes (0 => identity). Order: brightness
+    (multiplicative), contrast (around mid-gray), gamma (luminance curve), then
+    additive Gaussian sensor noise; clipped back to the input dtype's [0,255].
+    Meaningful on grayscale (where "colour" reduces to lighting/contrast) so it's
+    shared by the single-car ``ObservationNoise`` wrapper and the multi-car VecEnv.
+    """
+    if gaussian_std <= 0 and brightness <= 0 and contrast <= 0 and gamma <= 0:
+        return img
+    x = np.asarray(img, dtype=np.float32)
+    if brightness > 0:
+        x = x * (1.0 + rng.uniform(-brightness, brightness))
+    if contrast > 0:
+        x = (x - 128.0) * (1.0 + rng.uniform(-contrast, contrast)) + 128.0
+    if gamma > 0:
+        g = float(np.exp(rng.uniform(-gamma, gamma)))   # gamma in (e^-gamma, e^+gamma)
+        x = 255.0 * np.clip(x / 255.0, 0.0, 1.0) ** g
+    if gaussian_std > 0:
+        x = x + rng.normal(0.0, gaussian_std, size=x.shape)
+    return np.clip(x, 0, 255).astype(np.asarray(img).dtype)
+
+
 class ObservationNoise(gym.ObservationWrapper):
     """Perturb image observations — observation-noise / lighting DR.
 
-    For each uint8 image key in a Dict obs: optional per-step brightness jitter
-    (multiplicative) then additive Gaussian noise, clipped back to uint8 [0,255].
-    Apply OUTSIDE ``GrayscaleObs`` so it perturbs exactly what the policy sees.
-    Both knobs 0 ⇒ identity.
+    For each uint8 image key in a Dict obs: brightness, contrast, gamma, then
+    additive Gaussian noise (:func:`apply_image_jitter`). Apply OUTSIDE
+    ``GrayscaleObs`` so it perturbs exactly what the policy sees. All knobs 0 =>
+    identity. gaussian/brightness can be ADR-controlled; contrast/gamma are static.
     """
 
     def __init__(self, env: gym.Env, *, gaussian_std: float = 0.0,
-                 brightness_jitter: float = 0.0, seed: int | None = None, adr_state=None) -> None:
+                 brightness_jitter: float = 0.0, contrast: float = 0.0,
+                 gamma: float = 0.0, seed: int | None = None, adr_state=None) -> None:
         super().__init__(env)
         self._std = float(gaussian_std)
         self._bj = float(brightness_jitter)
+        self._contrast = float(contrast)
+        self._gamma = float(gamma)
         self._rng = np.random.default_rng(seed)
         self._adr = adr_state  # if set, read the (live, ADR-controlled) std/jitter each step
         self._img_keys: list[str] = []
@@ -235,16 +263,13 @@ class ObservationNoise(gym.ObservationWrapper):
     def observation(self, observation: dict) -> dict:
         std = self._adr.obs_gaussian if self._adr is not None else self._std
         bj = self._adr.obs_brightness if self._adr is not None else self._bj
-        if (std <= 0 and bj <= 0) or not self._img_keys:
+        if (std <= 0 and bj <= 0 and self._contrast <= 0 and self._gamma <= 0) or not self._img_keys:
             return observation
         out = dict(observation)
         for key in self._img_keys:
-            img = np.asarray(observation[key], dtype=np.float32)
-            if bj > 0:
-                img = img * (1.0 + self._rng.uniform(-bj, bj))
-            if std > 0:
-                img = img + self._rng.normal(0.0, std, size=img.shape)
-            out[key] = np.clip(img, 0, 255).astype(np.uint8)
+            out[key] = apply_image_jitter(
+                observation[key], self._rng, gaussian_std=std, brightness=bj,
+                contrast=self._contrast, gamma=self._gamma)
         return out
 
 

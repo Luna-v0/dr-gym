@@ -34,21 +34,36 @@ class FeatureObsWrapper(gym.Wrapper):
     """
 
     def __init__(self, env: gym.Env, params_source: Callable[[], Optional[dict]],
-                 features: tuple = ALL_FEATURES, targets_fn: Callable = all_targets) -> None:
+                 features: tuple = ALL_FEATURES, targets_fn: Callable = all_targets,
+                 *, feature_noise: float = 0.0, asymmetric: bool = False,
+                 seed: Optional[int] = None) -> None:
         super().__init__(env)
         self._params_source = params_source
         self._prev: Optional[dict] = None
         self._targets_fn = targets_fn           # all_targets (9) or actor_targets (11)
-        self.observation_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(len(features),), dtype=np.float32
-        )
+        self._noise = float(feature_noise)      # additive Gaussian std on the actor vector
+        self._asym = bool(asymmetric)
+        self._rng = np.random.default_rng(seed)
+        box = gym.spaces.Box(low=-1.0, high=1.0, shape=(len(features),), dtype=np.float32)
+        if self._asym:
+            # actor sees the noised vector; critic the TRUE one (asymmetric value net).
+            self.observation_space = gym.spaces.Dict({"actor": box, "critic": box})
+        else:
+            self.observation_space = box
 
-    def _features(self) -> np.ndarray:
+    def _features(self):
         params = self._params_source() or {}
-        feat = self._targets_fn(params, self._prev).astype(np.float32)
+        clean = self._targets_fn(params, self._prev).astype(np.float32)
         if params:
             self._prev = dict(params)
-        return feat
+        if self._noise > 0:
+            noised = np.clip(clean + self._rng.normal(0.0, self._noise, clean.shape),
+                             -1.0, 1.0).astype(np.float32)
+        else:
+            noised = clean
+        if self._asym:
+            return {"actor": noised, "critic": clean}
+        return noised
 
     def reset(self, **kwargs: Any):
         _obs, info = self.env.reset(**kwargs)

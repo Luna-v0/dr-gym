@@ -166,6 +166,15 @@ def _reconstruct_experiment(rc: dict) -> ExperimentConfig:
             chunk_steps=int(worlds_d.get("chunk_steps", 50_000)),
             rotations=int(worlds_d.get("rotations", 1)),
         ),
+        # ``build_env`` dispatches on (n_cars, camera_obs): a feature-obs model
+        # (camera_obs=False) needs the feature path, else the env yields a camera
+        # DICT obs that mismatches the policy's Box feature space. These default to
+        # (1, True) on ExperimentConfig, so they MUST be carried from the run_config
+        # or a feature model fails to evaluate. (DR is intentionally NOT carried —
+        # eval runs the policy's clean deterministic behaviour, no injected noise /
+        # random start, which is what view-mode is for.)
+        camera_obs=bool(rc.get("camera_obs", True)),
+        n_cars=int(rc.get("n_cars", 1)),
         # Carry through how the model was trained so the host launcher picks
         # the matching image arch (gpu vs cpu) and GPU access.
         use_gpu=bool(rc.get("use_gpu", False)),

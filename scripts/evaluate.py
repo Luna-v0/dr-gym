@@ -124,6 +124,14 @@ def _host_mode(args: argparse.Namespace) -> int:
         env["GYM_DR_EVAL_APP"] = to_container(app_path)
     if run_config_path is not None:
         env["GYM_DR_EVAL_RUN_CONFIG"] = to_container(run_config_path)
+    # Feature-obs models select their vector (9 vs the 11-feature actor set) via
+    # GYM_DR_FEATURE_SET, which the experiment SCRIPT sets at import but
+    # run_config.json doesn't capture — so reconstruction here would default to the
+    # 9-feature vector and mismatch an 11-input policy. Forward it from the host
+    # env when set (no-op for camera models / the default 9-feature path).
+    feature_set = os.environ.get("GYM_DR_FEATURE_SET")
+    if feature_set:
+        env["GYM_DR_FEATURE_SET"] = feature_set
 
     print(f"[evaluate] world={world!r} model={model_path.name}  rtf={args.rtf}  "
           f"GUI on vnc://localhost:5900", flush=True)

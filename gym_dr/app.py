@@ -229,6 +229,12 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     for _k, _v in os.environ.items():
         if _k.startswith("GYM_DR_DEMO_"):
             base_env[_k] = _v
+    # Forward the camera-CNN run's knobs into the container: the perception dataset
+    # recorder output dir (a container path under the mounted /workspace/artifacts)
+    # and the sim-side visual DR gate/seed (read by deepracer_env's VisualRandomizer).
+    for _k in ("GYM_DR_PERCEPTION_OUT", "GYM_DR_VISUAL_DR", "GYM_DR_VISUAL_DR_SEED"):
+        if os.getenv(_k):
+            base_env[_k] = os.environ[_k]
     if experiment.training.rtf_override is not None:
         base_env["RTF_OVERRIDE"] = str(experiment.training.rtf_override)
     if experiment.seed is not None:

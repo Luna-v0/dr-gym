@@ -44,8 +44,14 @@ class FeatureObs:
     """Camera-off observation: the low-dim feature vector (the reward elements).
 
     ``features`` selects the actor vector (default the 11-feature ACTOR_FEATURES);
-    nothing is rendered, so the sim step is much cheaper."""
+    nothing is rendered, so the sim step is much cheaper.
+
+    ``asymmetric_critic`` builds a Dict obs ``{"actor": noised, "critic": true}``
+    (pair with ``DomainRandomization.feature_noise`` + the
+    :class:`gym_dr.asymmetric.AsymmetricActorCriticPolicy`): the actor learns on a
+    noised vector while the value net keeps the clean ground truth."""
     features: Tuple[str, ...] = ()
+    asymmetric_critic: bool = False
 
     def __post_init__(self) -> None:
         if not self.features:

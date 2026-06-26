@@ -150,7 +150,9 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
     if dr is not None and dr.has_obs_noise:
         env = ObservationNoise(
             env, gaussian_std=spec_bounds(dr.obs_gaussian)[1],
-            brightness_jitter=spec_bounds(dr.obs_brightness)[1], seed=dr.seed, adr_state=adr_state,
+            brightness_jitter=spec_bounds(dr.obs_brightness)[1],
+            contrast=spec_bounds(dr.obs_contrast)[1], gamma=spec_bounds(dr.obs_gamma)[1],
+            seed=dr.seed, adr_state=adr_state,
         )
     # random_start / random_direction are now honoured via the controller config
     # above (deepracer-env RANDOM_START / RANDOM_DIRECTION reset modes) — needs

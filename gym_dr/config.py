@@ -488,12 +488,17 @@ class ExperimentConfig:
         _fill("camera_obs", env.camera_obs)
         if env.safe_rl is not None:
             _fill("cost", env.safe_rl.cost)
-        # Feature-obs vector selection (dispatch reads GYM_DR_FEATURE_SET).
+        # Feature-obs vector selection (dispatch reads GYM_DR_FEATURE_SET) +
+        # asymmetric-critic Dict obs (dispatch reads GYM_DR_ASYM_CRITIC). Set as env
+        # vars because the container RE-IMPORTS this experiment module — __post_init__
+        # runs again there, so the flags ride along without explicit forwarding.
         if isinstance(env.observation, FeatureObs):
             from gym_dr.perception import ACTOR_FEATURES
             import os
             if tuple(env.observation.features) == tuple(ACTOR_FEATURES):
                 os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"
+            if env.observation.asymmetric_critic:
+                os.environ["GYM_DR_ASYM_CRITIC"] = "1"
 
     def effective_strategy(self) -> WorldStrategy:
         """The world schedule actually used for this run.

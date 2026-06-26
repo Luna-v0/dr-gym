@@ -46,12 +46,22 @@ class MultiCarVecEnv(VecEnv):
                  action_cfg: ContinuousActionSpaceConfig,
                  actuator_steering_std: float = 0.0,
                  actuator_speed_std: float = 0.0,
-                 noise_seed: Optional[int] = None) -> None:
+                 noise_seed: Optional[int] = None,
+                 obs_gaussian: float = 0.0, obs_brightness: float = 0.0,
+                 obs_contrast: float = 0.0, obs_gamma: float = 0.0,
+                 recorder=None, car_tracks: Optional[Sequence[str]] = None,
+                 dr_meta: Optional[dict] = None) -> None:
         self._backend = backend
         self._camera = camera_obs
         self._cfg = action_cfg
         self._normalize = bool(getattr(action_cfg, "normalize_actions", True))
         n = backend.n_cars
+        # Perception dataset recorder (camera frames + feature targets). Only the
+        # camera path produces frames; ``recorder`` is None unless GYM_DR_PERCEPTION_OUT
+        # is set. car_tracks/dr_meta tag each episode shard (which track, what DR).
+        self._rec = recorder if camera_obs else None
+        self._car_tracks = list(car_tracks) if car_tracks else [""] * n
+        self._dr_meta = dict(dr_meta or {})
         # Actuator-noise DR (engineering units) applied per-car in the action
         # transform — the single-car ActuatorNoise wrapper can't reach this VecEnv
         # (metrics.wrap passes it through), so we replicate it here. 0 => off.
@@ -59,6 +69,15 @@ class MultiCarVecEnv(VecEnv):
             np.array([actuator_steering_std, actuator_speed_std], dtype=np.float32)
             if (actuator_steering_std or actuator_speed_std) else None)
         self._noise_rng = np.random.default_rng(noise_seed)
+        # Photometric observation DR for the camera path (brightness/contrast/gamma/
+        # gaussian). The single-car ObservationNoise wrapper can't reach this VecEnv,
+        # so we apply the SAME jitter here. The recorded dataset frame is the jittered
+        # one (what the policy sees); labels stay ground-truth (from reward_params).
+        self._obs_jitter = None
+        if camera_obs and (obs_gaussian or obs_brightness or obs_contrast or obs_gamma):
+            self._obs_jitter = dict(gaussian_std=float(obs_gaussian),
+                                    brightness=float(obs_brightness),
+                                    contrast=float(obs_contrast), gamma=float(obs_gamma))
 
         # engineering-unit action bounds (what the sim executes)
         self._low = np.array([action_cfg.steering_low, action_cfg.speed_low], dtype=np.float32)
@@ -100,6 +119,9 @@ class MultiCarVecEnv(VecEnv):
         if self._camera:
             img = np.asarray(raw_obs[self._image_key], dtype=np.uint8)
             gray = (img[..., :3].astype(np.float32) @ _LUMA).astype(np.uint8)
+            if self._obs_jitter is not None:
+                from gym_dr.envs.wrappers import apply_image_jitter
+                gray = apply_image_jitter(gray, self._noise_rng, **self._obs_jitter)
             return {self._image_key: gray[..., None]}  # Dict{key: (H, W, 1)}
         params = (info or {}).get("reward_params", {}) if info else {}
         feat = all_targets(params, self._prev_params[car]).astype(np.float32)
@@ -115,10 +137,34 @@ class MultiCarVecEnv(VecEnv):
         return np.stack(obs_list, axis=0)
 
     # ---- VecEnv interface -------------------------------------------- #
+    def _record_step(self, car: int, obs, params: Optional[dict]) -> None:
+        """Capture one camera frame + its feature target for the dataset (no-op
+        unless a recorder is attached). ``obs`` is this car's Dict camera obs."""
+        if self._rec is None or not params:
+            return
+        try:
+            self._rec.record(car, obs[self._image_key], params)
+        except Exception:  # noqa: BLE001 — recording must never break the rollout
+            pass
+
+    def _start_episode(self, car: int) -> None:
+        if self._rec is None:
+            return
+        track = self._car_tracks[car] if car < len(self._car_tracks) else ""
+        self._rec.start_episode(car, track=track, dr_meta=self._dr_meta)
+
     def reset(self) -> np.ndarray:
         self._prev_params = [None] * self.num_envs
+        if self._rec is not None:
+            self._rec.flush_all()  # drop any partial episodes from a prior rollout
         raw = self._backend.reset()
-        return self._stack([self._obs_from(raw[i], None, i) for i in range(self.num_envs)])
+        obs = [self._obs_from(raw[i], None, i) for i in range(self.num_envs)]
+        if self._rec is not None:
+            for i in range(self.num_envs):
+                self._start_episode(i)
+                # first frame has no reward_params from reset(); the first recorded
+                # frame comes on the next step, which is fine (stack warms up).
+        return self._stack(obs)
 
     def step_async(self, actions: np.ndarray) -> None:
         self._actions = np.asarray(actions, dtype=np.float32)
@@ -130,9 +176,15 @@ class MultiCarVecEnv(VecEnv):
         for i in range(self.num_envs):
             info = dict(infos[i]) if infos[i] else {}
             o = self._obs_from(raw_obs[i], infos[i], i)
+            # Record THIS step's frame + target before any auto-reset (the obs `o`
+            # here is the real step observation; `info["reward_params"]` its label).
+            self._record_step(i, o, info.get("reward_params"))
             if dones[i]:
                 info["terminal_observation"] = o
                 self._prev_params[i] = None
+                if self._rec is not None:          # close the shard, open the next
+                    self._rec.flush_episode(i)
+                    self._start_episode(i)
                 reset_raw = self._backend.reset_one(i)
                 o = self._obs_from(reset_raw, None, i)
             obs_out.append(o)
@@ -152,6 +204,13 @@ class MultiCarVecEnv(VecEnv):
         setattr(self, attr_name, value)
 
     def env_method(self, method_name: str, *args, indices=None, **kwargs) -> List[Any]:
+        # The eval callback toggles the recorder's phase tag (train/eval) around
+        # evaluation so eval-rollout shards are labelled — reached through the
+        # VecFrameStack wrapper's env_method passthrough.
+        if method_name == "set_recorder_phase":
+            if self._rec is not None and args:
+                self._rec.set_phase(args[0])
+            return [None for _ in self._idx(indices)]
         fn = getattr(self._backend, method_name, None)
         return [fn(*args, **kwargs) if callable(fn) else None for _ in self._idx(indices)]
 
@@ -227,9 +286,26 @@ def multi_car(experiment) -> MultiCarVecEnv:
         spacing=float(os.getenv("GYM_DR_DEMO_SPACING", "300")),
     )
     from gym_dr.randomization import spec_bounds
+    # Perception dataset recorder (camera frames + feature targets) — only active
+    # when GYM_DR_PERCEPTION_OUT is set; captures both training and eval rollouts
+    # (eval reuses this VecEnv). Tag shards with each car's track + the DR settings.
+    from gym_dr.perception import ACTOR_FEATURES
+    from gym_dr.perception_recorder import recorder_from_env
+    recorder = recorder_from_env(int(experiment.n_cars), ACTOR_FEATURES)
+    dr_meta = {
+        "visual_dr": os.getenv("GYM_DR_VISUAL_DR", "0"),
+        "friction_mu": os.getenv("GYM_DR_FRICTION_MU", ""),
+        "obs_gaussian_hi": spec_bounds(getattr(dr, "obs_gaussian", 0.0))[1] if dr else 0.0,
+        "steering_noise_hi": spec_bounds(dr.steering_noise)[1] if dr else 0.0,
+    }
     return MultiCarVecEnv(
         backend, camera_obs=bool(experiment.camera_obs), action_cfg=cfg,
         actuator_steering_std=spec_bounds(dr.steering_noise)[1] if dr else 0.0,
         actuator_speed_std=spec_bounds(dr.speed_noise)[1] if dr else 0.0,
         noise_seed=getattr(dr, "seed", None) if dr else None,
+        obs_gaussian=spec_bounds(dr.obs_gaussian)[1] if dr else 0.0,
+        obs_brightness=spec_bounds(dr.obs_brightness)[1] if dr else 0.0,
+        obs_contrast=spec_bounds(getattr(dr, "obs_contrast", 0.0))[1] if dr else 0.0,
+        obs_gamma=spec_bounds(getattr(dr, "obs_gamma", 0.0))[1] if dr else 0.0,
+        recorder=recorder, car_tracks=list(backend.worlds), dr_meta=dr_meta,
     )

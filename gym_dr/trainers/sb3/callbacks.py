@@ -392,6 +392,12 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
         counts_per_world: dict[str, dict] = {}
         if state is not None:
             state.use_eval_reward = True
+        # Tag perception-dataset shards captured during eval as phase="eval" (no-op
+        # when no recorder is attached); restored to "train" in the finally below.
+        try:
+            vec.env_method("set_recorder_phase", "eval")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             for world in self.eval_worlds:
                 self._swap(vec, world)
@@ -427,6 +433,10 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
         finally:
             if state is not None:
                 state.use_eval_reward = False
+            try:
+                vec.env_method("set_recorder_phase", "train")
+            except Exception:  # noqa: BLE001
+                pass
 
         agg = float(np.mean(list(per_world.values()))) if per_world else float("nan")
         self.last_mean_reward = agg
