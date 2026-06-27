@@ -1,0 +1,112 @@
+"""Asymmetric-critic feature oracle — MULTI-CAR (n=18) for proper DR aggregation.
+
+Domain randomization wants MANY variations aggregated per PPO update, not one
+variation per episode. Here the **18 cars each drive a different train track with
+their own per-episode DR** (drag / steering+speed bias / actuator + feature noise),
+so a single gradient step averages over 18 conditions at once — a far stronger,
+less-biased robustness signal than the single-car oracle (oracle_asym_robust.py),
+which sees one variation per episode. It's also ~10x faster on the 22-core laptop
+(feature obs scales ~linearly to n=20; n=18 = one car per train track).
+
+Same study as the single-car oracle: actor sees the NOISED 11-feature vector, the
+asymmetric critic sees the TRUE one (gym_dr.asymmetric.AsymmetricActorCriticPolicy);
+feature_noise + actuator/drag/bias/friction DR; 18 train / 8 held-out tracks chosen
+by max-min over the wobble x tightness map.
+
+The 18 cars cover ALL 18 train tracks every step (GYM_DR_DEMO_WORLDS), so no in-sim
+track rotation is needed. The HELD-OUT generalization eval is run SEPARATELY,
+single-car (multi-car can't hot-swap tracks): after/while this trains, evaluate a
+checkpoint on the 8 held-out worlds with scripts/evaluate.py (proven set_world).
+
+    GYM_DR_DEEPRACER_ENV_SRC=.../deepracer_env uv run --no-sync python experiments/oracle_asym_multicar.py
+"""
+import os
+
+os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"        # 11-feature actor vector
+
+from gym_dr import (                                       # noqa: E402
+    ADR, ContinuousActionSpaceConfig, EnvironmentConfig, ExperimentConfig,
+    FeatureObs, OrderedSplit, Range, Sb3Trainer, TraceConfig, TrackingConfig,
+    TrainingConfig, TRACKS, centerline_quadratic, clean_completion, train,
+)
+from gym_dr.asymmetric import AsymmetricActorCriticPolicy   # noqa: E402
+from gym_dr.envs.dispatch import build_env                  # noqa: E402
+from gym_dr.perception import ACTOR_FEATURES                # noqa: E402
+
+NAME = "oracle_asym_multicar"
+
+TRAIN_WORLDS = [
+    "Tokyo_Training_track", "hamption_pro", "2022_march_open", "Albert", "2022_july_open",
+    "2022_summit_speedway_mini", "caecer_loop", "thunder_hill_pro", "dubai_open",
+    "Virtual_May19_Train_track", "hamption_open", "2022_september_pro", "2022_march_pro",
+    "H_track", "2022_august_pro", "2022_summit_speedway", "morgan_open", "jyllandsringen_pro",
+]  # 18 tracks -> one car each
+EVAL_WORLDS = [   # held-out (single-car eval, separate): physical + diverse
+    "reinvent_base", "Oval_track", "morgan_pro", "New_York_Track",
+    "Mexico_track", "Monaco", "Canada_Training", "2022_august_open",
+]
+N_CARS = len(TRAIN_WORLDS)                                  # 18
+TOTAL_STEPS = int(os.getenv("GYM_DR_ORACLE_STEPS", "2000000"))  # ~10x throughput -> fast
+_PHYSICAL = {"reinvent_base", "reInvent2019_track", "Oval_track"}
+assert not (set(TRAIN_WORLDS) & _PHYSICAL), "physical tracks must stay held-out"
+assert not (set(TRAIN_WORLDS) & set(EVAL_WORLDS)), "train/eval must be disjoint"
+assert not sorted((set(TRAIN_WORLDS) | set(EVAL_WORLDS)) - set(TRACKS)), "unknown track"
+
+# Each car drives a different train track (one per car). app.py forwards
+# GYM_DR_DEMO_WORLDS; multi_car assigns names[i] to car i. WORLD_NAME (the base
+# .world) must equal worlds[0], which the curriculum's first_world sets.
+os.environ["GYM_DR_DEMO_WORLDS"] = ",".join(TRAIN_WORLDS)
+os.environ["GYM_DR_N_CARS"] = str(N_CARS)
+print(f"[oracle-mc] {N_CARS} cars / {N_CARS} train tracks (one each), {len(EVAL_WORLDS)} "
+      f"held-out (single-car eval, separate); asym critic + feature_noise; features={len(ACTOR_FEATURES)}")
+
+# Heavy DR — every car samples its OWN per-episode drag / bias, and per-step
+# actuator + feature noise, so one rollout aggregates 18 distinct conditions.
+DR = ADR(
+    feature_noise=Range(0.0, 0.30),            # Gaussian on the actor's feature vector
+    steering_noise=Range(0.0, 3.0), speed_noise=Range(0.0, 0.15),  # per-step jitter
+    steering_bias=15.0, speed_bias=0.5,        # per-EPISODE constant lean (miscalibration)
+    drag=Range(0.5, 1.0), friction=Range(0.8, 1.5),
+    random_start=True, random_direction=True,
+    step=0.1, promote=0.7, demote=0.3, seed=42,
+)
+
+ENV = EnvironmentConfig(
+    observation=FeatureObs(features=tuple(ACTOR_FEATURES), asymmetric_critic=True),
+    action_space=ContinuousActionSpaceConfig(
+        steering_low=-30.0, steering_high=30.0, speed_low=1.0, speed_high=4.0,
+        normalize_actions=True),
+    # Single training chunk on the base world (WORLD_NAME=TRAIN_WORLDS[0]); the 18
+    # cars' actual tracks come from GYM_DR_DEMO_WORLDS. eval_worlds EMPTY -> the
+    # in-sim eval callback never calls set_world (which multi-car can't do); the
+    # held-out generalization is measured separately, single-car.
+    curriculum=OrderedSplit(train_worlds=[TRAIN_WORLDS[0]], eval_worlds=[],
+                            chunk_steps=TOTAL_STEPS, rotations=1),
+    domain_randomization=DR,
+    n_cars=N_CARS, reward=centerline_quadratic, eval_reward=clean_completion,
+)
+
+experiment = ExperimentConfig(
+    name=NAME,
+    environment=ENV,
+    env_factory=build_env,
+    trainer=Sb3Trainer(
+        name="ppo", policy=AsymmetricActorCriticPolicy,   # actor=noised, critic=true
+        # n_steps=1024 keeps the rollout batch sane at 18 cars (18 * 1024 = 18.4k).
+        kwargs={"n_steps": 1024, "batch_size": 512, "learning_rate": 3.0e-4,
+                "ent_coef": 0.01, "gamma": 0.99, "gae_lambda": 0.95,
+                "clip_range": 0.2, "n_epochs": 10, "target_kl": 0.08,
+                "policy_kwargs": {"net_arch": {"pi": [128, 128], "vf": [128, 128]}}},
+        frame_stack=1, device="cpu"),
+    training=TrainingConfig(
+        total_timesteps=TOTAL_STEPS, checkpoint_freq=100_000,
+        checkpoint_keep_last=5, eval_freq=10 ** 12, n_eval_episodes=5,
+        rtf_override=60),
+    tracking=TrackingConfig(mlflow_experiment=NAME),
+    trace=TraceConfig(enabled=False),
+    seed=42, use_gpu=False,
+)
+
+
+if __name__ == "__main__":
+    train(experiment)
