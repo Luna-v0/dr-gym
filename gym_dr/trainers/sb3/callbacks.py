@@ -396,6 +396,7 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
         # when no recorder is attached); restored to "train" in the finally below.
         try:
             vec.env_method("set_recorder_phase", "eval")
+            vec.env_method("set_metrics_eval_mode", True)   # per-car metrics -> eval reward
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -435,6 +436,7 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
                 state.use_eval_reward = False
             try:
                 vec.env_method("set_recorder_phase", "train")
+                vec.env_method("set_metrics_eval_mode", False)
             except Exception:  # noqa: BLE001
                 pass
 

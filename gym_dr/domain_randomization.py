@@ -42,8 +42,10 @@ ADR_NOISE_DIMS: Tuple[str, ...] = (
 class DomainRandomization:
     """Static domain randomization — every knob a ``Range``/``Choice``/scalar."""
 
-    steering_noise: ParamSpec = 0.0     # deg  (±30 steering range)
-    speed_noise: ParamSpec = 0.0        # m/s  (1–4 speed range)
+    steering_noise: ParamSpec = 0.0     # deg, per-STEP symmetric jitter (±30 range)
+    speed_noise: ParamSpec = 0.0        # m/s, per-STEP symmetric jitter (1–4 range)
+    steering_bias: ParamSpec = 0.0      # deg, max |per-EPISODE constant lean| (trim off)
+    speed_bias: ParamSpec = 0.0         # m/s, max |per-EPISODE constant speed offset|
     obs_gaussian: ParamSpec = 0.0       # 0–255 grayscale additive
     obs_brightness: ParamSpec = 0.0     # per-step multiplicative fraction
     obs_contrast: ParamSpec = 0.0       # per-step contrast jitter around mid-gray
@@ -61,6 +63,10 @@ class DomainRandomization:
     @property
     def has_action_noise(self) -> bool:
         return spec_bounds(self.steering_noise)[1] > 0 or spec_bounds(self.speed_noise)[1] > 0
+
+    @property
+    def has_action_bias(self) -> bool:
+        return spec_bounds(self.steering_bias)[1] > 0 or spec_bounds(self.speed_bias)[1] > 0
 
     @property
     def has_feature_noise(self) -> bool:

@@ -174,7 +174,11 @@ def _reconstruct_experiment(rc: dict) -> ExperimentConfig:
         # eval runs the policy's clean deterministic behaviour, no injected noise /
         # random start, which is what view-mode is for.)
         camera_obs=bool(rc.get("camera_obs", True)),
-        n_cars=int(rc.get("n_cars", 1)),
+        # Evaluation is ALWAYS single-agent: the policy is shared across cars, so one
+        # car is a valid eval. A multi-car-trained model (n_cars=2) must NOT rebuild
+        # the MultiCarVecEnv here — run_evaluation wraps a single gym.Env in
+        # DummyVecEnv, and a VecEnv there raises "not a Gymnasium environment".
+        n_cars=1,
         # Carry through how the model was trained so the host launcher picks
         # the matching image arch (gpu vs cpu) and GPU access.
         use_gpu=bool(rc.get("use_gpu", False)),

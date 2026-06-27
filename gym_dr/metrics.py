@@ -364,10 +364,19 @@ def install_metrics(
     wrapped_experiment = experiment.with_overrides(reward=wrapped_reward)
 
     def wrap(env: Any) -> Any:
-        # The per-episode metrics wrapper is single-env (gym.Wrapper). A multi-car
-        # env is already an SB3 VecEnv (num_envs=N) — wrapping it as a gym.Wrapper
-        # would break the VecEnv contract, so pass it through. (Per-car multi-agent
-        # metrics are a follow-up, MC-4 — docs/reports/multi-car.md.)
+        # The per-episode metrics wrapper is single-env (gym.Wrapper). A multi-car env
+        # is an SB3 VecEnv (num_envs=N) — wrapping it as a gym.Wrapper breaks the VecEnv
+        # contract. Instead, attach per-car ``_EpisodeMetrics`` so multi-car produces
+        # the SAME info[i]["dr_episode"] the single-car wrapper does — the unified
+        # pipeline. ``state.capture_path`` is set by the trainer before wrap() runs.
+        try:
+            from gym_dr.envs.multi_car import MultiCarVecEnv
+            if isinstance(env, MultiCarVecEnv):
+                env.attach_metrics(cost_fn=cost_fn, eval_reward_fn=eval_reward_fn,
+                                   capture_path=state.capture_path)
+                return env
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from stable_baselines3.common.vec_env.base_vec_env import VecEnv
             if isinstance(env, VecEnv):

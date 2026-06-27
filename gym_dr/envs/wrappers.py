@@ -161,11 +161,23 @@ class ActuatorNoise(gym.ActionWrapper):
     """
 
     def __init__(self, env: gym.Env, *, steering_std: float = 0.0,
-                 speed_std: float = 0.0, seed: int | None = None, adr_state=None) -> None:
+                 speed_std: float = 0.0, steering_bias_max: float = 0.0,
+                 speed_bias_max: float = 0.0, seed: int | None = None,
+                 adr_state=None) -> None:
         super().__init__(env)
         self._std = np.array([steering_std, speed_std], dtype=np.float32)
+        # Per-EPISODE constant lean (a miscalibrated actuator: steering trim off /
+        # motor offset), resampled at reset ~U[-max, max]; distinct from the per-STEP
+        # symmetric jitter above. Mirrors the multi-car path so both share the model.
+        self._bias_max = np.array([steering_bias_max, speed_bias_max], dtype=np.float32)
+        self._bias = np.zeros(2, dtype=np.float32)
         self._rng = np.random.default_rng(seed)
         self._adr = adr_state  # if set, read the (live, ADR-controlled) std each step
+
+    def reset(self, **kwargs):
+        if np.any(self._bias_max > 0):
+            self._bias = self._rng.uniform(-self._bias_max, self._bias_max).astype(np.float32)
+        return self.env.reset(**kwargs)
 
     def action(self, action):
         a = np.asarray(action, dtype=np.float32)
@@ -174,8 +186,11 @@ class ActuatorNoise(gym.ActionWrapper):
                            dtype=np.float32)
         else:
             std = self._std
-        if np.any(std > 0) and a.shape[-1] == 2:
-            a = a + self._rng.normal(0.0, 1.0, size=a.shape).astype(np.float32) * std
+        if a.shape[-1] == 2:
+            if np.any(self._bias_max > 0):       # constant per-episode lean
+                a = a + self._bias
+            if np.any(std > 0):                  # per-step symmetric jitter
+                a = a + self._rng.normal(0.0, 1.0, size=a.shape).astype(np.float32) * std
         return a
 
 

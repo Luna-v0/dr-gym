@@ -133,10 +133,13 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
         # Actuator-noise DR (engineering units) sits between ActionBounds (inner
         # clip, re-bounds the noisy command) and NormalizeActions (outer
         # [-1,1]->eng map applied first). See docs/reports/domain-randomization.md.
-        if dr is not None and dr.has_action_noise:
+        if dr is not None and (dr.has_action_noise or dr.has_action_bias):
             env = ActuatorNoise(
                 env, steering_std=spec_bounds(dr.steering_noise)[1],
-                speed_std=spec_bounds(dr.speed_noise)[1], seed=dr.seed, adr_state=adr_state,
+                speed_std=spec_bounds(dr.speed_noise)[1],
+                steering_bias_max=spec_bounds(getattr(dr, "steering_bias", 0.0))[1],
+                speed_bias_max=spec_bounds(getattr(dr, "speed_bias", 0.0))[1],
+                seed=dr.seed, adr_state=adr_state,
             )
         # Optionally let the policy act in a symmetric [-1, 1] space (mapped back
         # to engineering units for the env). Keeps the ONNX/on-car interface in

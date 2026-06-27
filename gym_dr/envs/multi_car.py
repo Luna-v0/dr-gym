@@ -49,6 +49,9 @@ class MultiCarVecEnv(VecEnv):
                  noise_seed: Optional[int] = None,
                  obs_gaussian: float = 0.0, obs_brightness: float = 0.0,
                  obs_contrast: float = 0.0, obs_gamma: float = 0.0,
+                 drag_spec=None, steer_bias_max: float = 0.0, speed_bias_max: float = 0.0,
+                 feature_targets=None, feature_dim: int = 0,
+                 feature_noise: float = 0.0, feature_asym: bool = False,
                  recorder=None, car_tracks: Optional[Sequence[str]] = None,
                  dr_meta: Optional[dict] = None) -> None:
         self._backend = backend
@@ -69,6 +72,26 @@ class MultiCarVecEnv(VecEnv):
             np.array([actuator_steering_std, actuator_speed_std], dtype=np.float32)
             if (actuator_steering_std or actuator_speed_std) else None)
         self._noise_rng = np.random.default_rng(noise_seed)
+        # Per-episode speed regime ("drag"): each episode multiplies the COMMANDED
+        # speed by a factor ~U[low, 1.0] so some whole episodes drive slow and others
+        # fast — that's what makes the dataset's executed-speed distribution span the
+        # full range (slow→peak) rather than bunching where the policy likes to drive.
+        # The single-car DragRandomization wrapper can't reach this VecEnv, so we
+        # replicate it per-car here (resampled on each car's episode reset).
+        from gym_dr.randomization import sample_spec, spec_bounds
+        self._samp = sample_spec
+        self._drag_spec = drag_spec
+        self._has_drag = drag_spec is not None and spec_bounds(drag_spec)[0] < 1.0
+        self._drag_factor = np.ones(n, dtype=np.float32)
+        # Per-episode ACTUATOR BIAS: a CONSTANT lean held for the whole episode (a
+        # miscalibrated actuator) — e.g. a steering trim where "0 command -> -20 deg",
+        # or a motor that runs hot/cold (a speed offset). Resampled per car per episode
+        # from U[-max, +max]; the policy must detect the drift and compensate. Distinct
+        # from the per-STEP symmetric jitter (_act_noise). 0 => off.
+        self._steer_bias_max = float(steer_bias_max)
+        self._speed_bias_max = float(speed_bias_max)
+        self._has_bias = self._steer_bias_max > 0.0 or self._speed_bias_max > 0.0
+        self._act_bias = np.zeros((n, 2), dtype=np.float32)
         # Photometric observation DR for the camera path (brightness/contrast/gamma/
         # gaussian). The single-car ObservationNoise wrapper can't reach this VecEnv,
         # so we apply the SAME jitter here. The recorded dataset frame is the jittered
@@ -88,6 +111,15 @@ class MultiCarVecEnv(VecEnv):
         else:
             action_space = gym.spaces.Box(self._low, self._high, dtype=np.float32)
 
+        # Feature-obs config (camera-off path): which target builder (actor_targets 11
+        # vs all_targets 9), the dim, per-step feature noise on the ACTOR vector, and
+        # the asymmetric Dict obs {actor:noised, critic:true} — mirrors the single-car
+        # FeatureObsWrapper so the asym oracle can run multi-car at high car counts.
+        self._feat_targets = feature_targets or all_targets
+        self._feat_dim = int(feature_dim) or len(ALL_FEATURES)
+        self._feat_noise = float(feature_noise)
+        self._feat_asym = bool(feature_asym) and not camera_obs
+
         if camera_obs:
             self._image_key = _find_image_key(backend.single_observation_space)
             if self._image_key is None:
@@ -100,18 +132,43 @@ class MultiCarVecEnv(VecEnv):
                 {self._image_key: gym.spaces.Box(0, 255, (h, w, 1), np.uint8)})
         else:
             self._image_key = None
-            obs_space = gym.spaces.Box(-1.0, 1.0, (len(ALL_FEATURES),), np.float32)
+            _fbox = gym.spaces.Box(-1.0, 1.0, (self._feat_dim,), np.float32)
+            obs_space = (gym.spaces.Dict({"actor": _fbox, "critic": _fbox})
+                         if self._feat_asym else _fbox)
 
         super().__init__(num_envs=n, observation_space=obs_space, action_space=action_space)
         self._actions: Optional[np.ndarray] = None
         self._prev_params: List[Optional[dict]] = [None] * n
+        # Per-car episode metrics: the SAME ``_EpisodeMetrics`` the single-car wrapper
+        # uses, one per car, attached by ``gym_dr.metrics.install_metrics``. They make
+        # multi-car stamp ``info[i]["dr_episode"]`` (+ path), so the existing vec-aware
+        # callbacks (dr/* logging, clean_completion eval, path plots) light up exactly
+        # like the single-car path — the unified pipeline. ``None`` until attached.
+        self._metrics: List[Any] = [None] * n
+        self._eval_reward_fn: Optional[Any] = None
+        self._use_eval = False
 
     # ---- action / obs transforms ------------------------------------- #
-    def _to_engineering(self, action: np.ndarray) -> np.ndarray:
-        a = np.asarray(action, dtype=np.float32)
+    def _resample_drag(self, car: int) -> None:
+        """Resample this car's per-EPISODE actuator DR: speed regime (drag) + the
+        constant steering/speed bias (held for the whole episode)."""
+        if self._has_drag:
+            self._drag_factor[car] = float(self._samp(self._drag_spec, self._noise_rng))
+        if self._has_bias:
+            self._act_bias[car, 0] = self._noise_rng.uniform(
+                -self._steer_bias_max, self._steer_bias_max)
+            self._act_bias[car, 1] = self._noise_rng.uniform(
+                -self._speed_bias_max, self._speed_bias_max)
+
+    def _to_engineering(self, action: np.ndarray, car: int = 0) -> np.ndarray:
+        a = np.asarray(action, dtype=np.float32).copy()
         if self._normalize:  # [-1,1] -> [low, high]
             a = self._low + (a + 1.0) * 0.5 * (self._high - self._low)
-        if self._act_noise is not None:  # additive Gaussian in engineering units
+        if self._has_drag:   # per-episode speed regime: scale commanded speed
+            a[1] = a[1] * self._drag_factor[car]
+        if self._has_bias:   # per-episode constant lean (steering trim / motor offset)
+            a = a + self._act_bias[car]
+        if self._act_noise is not None:  # additive per-step (symmetric) Gaussian jitter
             a = a + self._act_noise * self._noise_rng.standard_normal(2).astype(np.float32)
         return np.clip(a, self._low, self._high)
 
@@ -124,14 +181,24 @@ class MultiCarVecEnv(VecEnv):
                 gray = apply_image_jitter(gray, self._noise_rng, **self._obs_jitter)
             return {self._image_key: gray[..., None]}  # Dict{key: (H, W, 1)}
         params = (info or {}).get("reward_params", {}) if info else {}
-        feat = all_targets(params, self._prev_params[car]).astype(np.float32)
+        clean = self._feat_targets(params, self._prev_params[car]).astype(np.float32)
         if params:
             self._prev_params[car] = dict(params)
-        return feat
+        if self._feat_noise > 0:   # actor-robustness DR: noise the feature vector
+            noised = np.clip(clean + self._noise_rng.normal(0.0, self._feat_noise, clean.shape),
+                             -1.0, 1.0).astype(np.float32)
+        else:
+            noised = clean
+        if self._feat_asym:        # actor sees noised, critic sees the TRUE vector
+            return {"actor": noised, "critic": clean}
+        return noised
 
     def _stack(self, obs_list: Sequence[Any]):
-        """Batch per-car obs to num_envs-first. Dict (camera) stacks per key;
-        array (feature) stacks directly."""
+        """Batch per-car obs to num_envs-first. Dict obs (camera image, OR the
+        asymmetric {actor,critic} feature obs) stack per key; a plain feature array
+        stacks directly."""
+        if isinstance(obs_list[0], dict):
+            return {k: np.stack([o[k] for o in obs_list], axis=0) for k in obs_list[0]}
         if self._camera:
             return {self._image_key: np.stack([o[self._image_key] for o in obs_list], axis=0)}
         return np.stack(obs_list, axis=0)
@@ -153,8 +220,43 @@ class MultiCarVecEnv(VecEnv):
         track = self._car_tracks[car] if car < len(self._car_tracks) else ""
         self._rec.start_episode(car, track=track, dr_meta=self._dr_meta)
 
+    # ---- per-car episode metrics (unified pipeline) ------------------- #
+    def attach_metrics(self, *, cost_fn=None, eval_reward_fn=None,
+                       capture_path: bool = False) -> None:
+        """Build one ``_EpisodeMetrics`` per car (called by ``install_metrics``).
+
+        Mirrors the single-car ``_MetricsEnvWrapper`` so multi-car produces the same
+        ``info[i]["dr_episode"]`` the dr/* + eval callbacks consume. Trace sinks are
+        not attached here (multi-car trace is a follow-up; the camera run has trace
+        off and uses the perception recorder for its dataset)."""
+        from gym_dr.metrics import _EpisodeMetrics
+        self._eval_reward_fn = eval_reward_fn
+        self._metrics = []
+        for _ in range(self.num_envs):
+            st = _EpisodeMetrics()
+            st.cost_fn = cost_fn
+            st.capture_path = bool(capture_path)
+            self._metrics.append(st)
+
+    def _record_metrics(self, car: int, params: Optional[dict], reward: float) -> float:
+        """Feed this car's step into its metrics state; return the eval-reward value."""
+        st = self._metrics[car]
+        if st is None or not params:
+            return 0.0
+        er = float(self._eval_reward_fn(params)) if self._eval_reward_fn else 0.0
+        try:
+            st.record_step(params, float(reward), er)
+        except Exception:  # noqa: BLE001 — metrics must never break the rollout
+            pass
+        return er
+
     def reset(self) -> np.ndarray:
         self._prev_params = [None] * self.num_envs
+        for i in range(self.num_envs):             # fresh per-car speed regime
+            self._resample_drag(i)
+        for st in self._metrics:                   # drop partial episodes' metrics
+            if st is not None:
+                st.reset()
         if self._rec is not None:
             self._rec.flush_all()  # drop any partial episodes from a prior rollout
         raw = self._backend.reset()
@@ -170,26 +272,39 @@ class MultiCarVecEnv(VecEnv):
         self._actions = np.asarray(actions, dtype=np.float32)
 
     def step_wait(self):
-        eng = [self._to_engineering(self._actions[i]) for i in range(self.num_envs)]
+        eng = [self._to_engineering(self._actions[i], i) for i in range(self.num_envs)]
         raw_obs, rewards, dones, infos = self._backend.step(eng)
-        obs_out, info_out = [], []
+        obs_out, info_out, rew_out = [], [], []
         for i in range(self.num_envs):
             info = dict(infos[i]) if infos[i] else {}
             o = self._obs_from(raw_obs[i], infos[i], i)
+            params = info.get("reward_params")
             # Record THIS step's frame + target before any auto-reset (the obs `o`
-            # here is the real step observation; `info["reward_params"]` its label).
-            self._record_step(i, o, info.get("reward_params"))
+            # here is the real step observation; ``params`` its label).
+            self._record_step(i, o, params)
+            # Per-car episode metrics (unified pipeline): accumulate this step.
+            eval_r = self._record_metrics(i, params, rewards[i])
+            # During eval, return the eval-reward (matches the single-car wrapper);
+            # otherwise the training reward.
+            rew_out.append(eval_r if (self._use_eval and self._eval_reward_fn) else rewards[i])
             if dones[i]:
                 info["terminal_observation"] = o
                 self._prev_params[i] = None
+                st = self._metrics[i]
+                if st is not None:                 # stamp the summary the callbacks read
+                    info["dr_episode"] = st.summary()
+                    if st.capture_path:
+                        info["dr_episode_path"] = st.path_payload()
+                    st.reset()
                 if self._rec is not None:          # close the shard, open the next
                     self._rec.flush_episode(i)
                     self._start_episode(i)
+                self._resample_drag(i)             # new episode's speed regime
                 reset_raw = self._backend.reset_one(i)
                 o = self._obs_from(reset_raw, None, i)
             obs_out.append(o)
             info_out.append(info)
-        return (self._stack(obs_out), np.asarray(rewards, np.float32),
+        return (self._stack(obs_out), np.asarray(rew_out, np.float32),
                 np.asarray(dones, dtype=bool), info_out)
 
     def close(self) -> None:
@@ -210,6 +325,14 @@ class MultiCarVecEnv(VecEnv):
         if method_name == "set_recorder_phase":
             if self._rec is not None and args:
                 self._rec.set_phase(args[0])
+            return [None for _ in self._idx(indices)]
+        # The eval callback flips this around evaluation so the per-car metrics report
+        # the eval reward (mirrors the single-car state.use_eval_reward toggle).
+        if method_name == "set_metrics_eval_mode":
+            self._use_eval = bool(args[0]) if args else False
+            for st in self._metrics:
+                if st is not None:
+                    st.use_eval_reward = self._use_eval
             return [None for _ in self._idx(indices)]
         fn = getattr(self._backend, method_name, None)
         return [fn(*args, **kwargs) if callable(fn) else None for _ in self._idx(indices)]
@@ -274,9 +397,15 @@ def multi_car(experiment) -> MultiCarVecEnv:
         reset_config["random_start"] = True
     if dr is not None and getattr(dr, "random_direction", False):
         reset_config["random_direction"] = True
+    # Use the RAW reward in the backend: ``install_metrics`` hands us a reward whose
+    # closure records into a single shared ``_EpisodeMetrics``. With N cars that state
+    # would accumulate every car's steps forever (wrong + a memory leak). The unified
+    # per-car metrics (attach_metrics) do the recording instead, so the backend needs
+    # only the plain reward value. ``__wrapped__`` is the original (metrics.py).
+    reward_fn = getattr(experiment.reward, "__wrapped__", experiment.reward)
     backend = MultiAgentDeepRacerEnv(
         n_cars=int(experiment.n_cars),
-        reward_fn=experiment.reward,
+        reward_fn=reward_fn,
         sensors=sensors,
         worlds=worlds,
         config=reset_config or None,
@@ -286,6 +415,14 @@ def multi_car(experiment) -> MultiCarVecEnv:
         spacing=float(os.getenv("GYM_DR_DEMO_SPACING", "300")),
     )
     from gym_dr.randomization import spec_bounds
+    # Feature-obs vector: actor_targets (11) when GYM_DR_FEATURE_SET=actor_extended,
+    # else all_targets (9) — mirrors feature_time_trial so the multi-car feature path
+    # matches the single-car one (incl. the asym oracle).
+    if os.getenv("GYM_DR_FEATURE_SET") == "actor_extended":
+        from gym_dr.perception import ACTOR_FEATURES as _AF, actor_targets as _ftargets
+        _fdim = len(_AF)
+    else:
+        _ftargets, _fdim = all_targets, len(ALL_FEATURES)
     # Perception dataset recorder (camera frames + feature targets) — only active
     # when GYM_DR_PERCEPTION_OUT is set; captures both training and eval rollouts
     # (eval reuses this VecEnv). Tag shards with each car's track + the DR settings.
@@ -307,5 +444,11 @@ def multi_car(experiment) -> MultiCarVecEnv:
         obs_brightness=spec_bounds(dr.obs_brightness)[1] if dr else 0.0,
         obs_contrast=spec_bounds(getattr(dr, "obs_contrast", 0.0))[1] if dr else 0.0,
         obs_gamma=spec_bounds(getattr(dr, "obs_gamma", 0.0))[1] if dr else 0.0,
+        drag_spec=getattr(dr, "drag", None) if dr else None,
+        steer_bias_max=spec_bounds(getattr(dr, "steering_bias", 0.0))[1] if dr else 0.0,
+        speed_bias_max=spec_bounds(getattr(dr, "speed_bias", 0.0))[1] if dr else 0.0,
+        feature_targets=_ftargets, feature_dim=_fdim,
+        feature_noise=spec_bounds(getattr(dr, "feature_noise", 0.0))[1] if dr else 0.0,
+        feature_asym=(os.getenv("GYM_DR_ASYM_CRITIC") == "1" and not bool(experiment.camera_obs)),
         recorder=recorder, car_tracks=list(backend.worlds), dr_meta=dr_meta,
     )

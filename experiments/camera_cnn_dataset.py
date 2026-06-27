@@ -37,7 +37,7 @@ from pathlib import Path
 from gym_dr import (                                              # noqa: E402
     ADR, ContinuousActionSpaceConfig, CameraObs, EnvironmentConfig,
     ExperimentConfig, OrderedSplit, Range, Sb3Trainer, TraceConfig,
-    TrackingConfig, TrainingConfig, centerline_quadratic, clean_completion,
+    TrackingConfig, TrainingConfig, clean_completion, progress_per_step,
     existing_tracks, train,
 )
 from gym_dr.app import train as _train                           # noqa: E402  (host loop calls this)
@@ -88,18 +88,32 @@ def build_experiment(pair: tuple[str, str], resume: str | None) -> ExperimentCon
     # Heavy DR (ADR): noise ceilings grow with held-out clean-completion. Visual DR
     # is image-space here (brightness/contrast/gamma/gaussian) + sim-side track/bg
     # recolor via GYM_DR_VISUAL_DR (deepracer_env VisualRandomizer).
+    # STRONG action noise so the EXECUTED steering/speed get dragged up & down — this
+    # is what spreads the dataset across the speed range (the speed_mps targets span
+    # [1,4]) and adds steering variety, instead of the data bunching at one operating
+    # point. (multi_car applies the Range's high as the actuator-noise std.)
+    #   speed_noise 1.0 m/s on a [1,4] range; steering_noise 6 deg on +-30.
+    # Plus the camera input noise (gaussian/brightness/contrast/gamma).
     dr = ADR(
-        steering_noise=Range(0.0, 3.0), speed_noise=Range(0.0, 0.15),
+        steering_noise=Range(0.0, 6.0), speed_noise=Range(0.0, 1.0),  # per-step jitter
+        # per-EPISODE constant lean (miscalibrated actuator): "0 steering -> up to ±20
+        # deg", motor offset up to ±1 m/s — the policy must detect the drift + correct.
+        steering_bias=20.0, speed_bias=1.0,
         obs_gaussian=Range(0.0, 18.0), obs_brightness=Range(0.0, 0.4),
         obs_contrast=Range(0.0, 0.5), obs_gamma=Range(0.0, 0.5),
-        drag=Range(0.7, 1.0), friction=Range(0.7, 1.6),
+        # per-EPISODE speed regime: drag 0.2..1.0 makes whole episodes drive slow→fast,
+        # so the dataset's executed-speed distribution spans the full range (with
+        # speed_low=0.2 the slow episodes reach ~0.2 m/s, fast ones ~peak).
+        drag=Range(0.2, 1.0), friction=Range(0.7, 1.6),
         random_start=True, random_direction=True,
         step=0.1, promote=0.7, demote=0.3, seed=42,
     )
     env = EnvironmentConfig(
         observation=CameraObs(),                          # vision (grayscale 4-stack)
         action_space=ContinuousActionSpaceConfig(
-            steering_low=-30.0, steering_high=30.0, speed_low=1.0, speed_high=4.0,
+            # speed_low=0.2 (was 1.0) so drag/bias-slowed episodes actually execute
+            # really slow — the dataset's speed_mps targets then span ~0.2..4.0 m/s.
+            steering_low=-30.0, steering_high=30.0, speed_low=0.2, speed_high=4.0,
             normalize_actions=True),
         # first_world = pair[0] => the container's WORLD_NAME; the 2 cars' actual
         # tracks come from GYM_DR_DEMO_WORLDS=pair (set in the loop). eval_worlds is
@@ -107,7 +121,10 @@ def build_experiment(pair: tuple[str, str], resume: str | None) -> ExperimentCon
         curriculum=OrderedSplit(train_worlds=[pair[0]], eval_worlds=EVAL_WORLDS,
                                 chunk_steps=CHUNK_STEPS, rotations=1),
         domain_randomization=dr,
-        n_cars=2, reward=centerline_quadratic, eval_reward=clean_completion,
+        # progress_per_step = (progress/steps)*100 + speed^2 — the speed^2 term makes
+        # crawling unrewarding, so the policy must commit to pace (fixes the prior
+        # slow-driving exploit under centerline_quadratic). eval stays clean_completion.
+        n_cars=2, reward=progress_per_step, eval_reward=clean_completion,
     )
     return ExperimentConfig(
         name=NAME,
