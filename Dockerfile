@@ -43,9 +43,18 @@ ENTRYPOINT ["/bin/bash", "-c"]
 #     startup (then DeepRacerEnv.set_world() swaps tracks between chunks). So the
 #     `rosparam set` line is gone; the env var already crosses the boundary.
 #   * `ros2 launch ... deepracer_env.launch.py` replaces `roslaunch`.
+# Single-car -> deepracer_env.launch.py; multi-car (GYM_DR_N_CARS>1) ->
+# multi_arena.launch.py with spawn_tracks:=false (MultiAgentDeepRacerEnv spawns
+# the per-car track instances itself). Multi-car needs longer to bring up N
+# namespaced cars + controller_managers, so wait more.
 CMD ["source /opt/ros/lyrical/setup.bash && \
       source /opt/simapp/setup.bash && \
-      { ros2 launch deepracer_simulation_environment deepracer_env.launch.py & } && \
-      sleep 8 && \
+      if [ \"${GYM_DR_N_CARS:-1}\" -gt 1 ]; then \
+        { ros2 launch deepracer_simulation_environment multi_arena.launch.py n_cars:=${GYM_DR_N_CARS} spawn_tracks:=false & } && \
+        sleep ${GYM_DR_LAUNCH_WAIT:-35}; \
+      else \
+        { ros2 launch deepracer_simulation_environment deepracer_env.launch.py & } && \
+        sleep ${GYM_DR_LAUNCH_WAIT:-8}; \
+      fi && \
       cd /workspace && \
       python3 -u \"${EXPERIMENT_PATH}\""]
