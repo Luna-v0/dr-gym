@@ -52,6 +52,7 @@ class MultiCarVecEnv(VecEnv):
                  drag_spec=None, steer_bias_max: float = 0.0, speed_bias_max: float = 0.0,
                  feature_targets=None, feature_dim: int = 0,
                  feature_noise: float = 0.0, feature_asym: bool = False,
+                 dr_warmup_steps: int = 0,
                  recorder=None, car_tracks: Optional[Sequence[str]] = None,
                  dr_meta: Optional[dict] = None) -> None:
         self._backend = backend
@@ -120,6 +121,20 @@ class MultiCarVecEnv(VecEnv):
         self._feat_noise = float(feature_noise)
         self._feat_asym = bool(feature_asym) and not camera_obs
 
+        # DR WARMUP (the multi-car ADR substitute). Multi-car can't run the in-loop
+        # held-out eval that feedback-ADR needs (set_world is disabled here), so
+        # instead of applying every DR magnitude at full strength from step 0 — which
+        # left the policy in an unlearnable POMDP (unobservable ±bias + full
+        # feature/actuator noise) and flatlined learning — we ramp ALL magnitude
+        # knobs (bias, feature_noise, actuator + obs noise) by a factor that grows
+        # linearly 0 -> 1 over the first ``dr_warmup_steps`` TIMESTEPS. Early
+        # episodes are near-clean (learnable + survivable, so the frame-stacked
+        # policy can observe the drift and infer the bias); the perturbations reach
+        # full strength only once it can drive. Self-counted from the VecEnv's own
+        # step count — no callback/eval signal needed. 0 => off (full strength).
+        self._dr_warmup_steps = int(dr_warmup_steps)
+        self._dr_steps = 0
+
         if camera_obs:
             self._image_key = _find_image_key(backend.single_observation_space)
             if self._image_key is None:
@@ -147,18 +162,37 @@ class MultiCarVecEnv(VecEnv):
         self._metrics: List[Any] = [None] * n
         self._eval_reward_fn: Optional[Any] = None
         self._use_eval = False
+        # The multi-agent backend has NO set_world (each car's track + offset TrackData
+        # is fixed at construction). The eval callback reads this to avoid "evaluating"
+        # every held-out world on the current training tracks (a silent set_world no-op
+        # that would fake per-world metrics + a ~0 generalization gap). Held-out eval is
+        # a separate single-car pass. See gym_dr/trainers/sb3/callbacks.py.
+        self.can_set_world: bool = hasattr(backend, "set_world")
 
     # ---- action / obs transforms ------------------------------------- #
+    def _dr_scale(self) -> float:
+        """Current DR magnitude multiplier in [0, 1] — the linear warmup factor.
+
+        Grows 0 -> 1 over the first ``dr_warmup_steps`` timesteps, then stays 1.
+        ``0`` warmup steps => always 1.0 (full strength, the legacy behaviour).
+        """
+        if self._dr_warmup_steps <= 0:
+            return 1.0
+        return min(1.0, self._dr_steps / float(self._dr_warmup_steps))
+
     def _resample_drag(self, car: int) -> None:
         """Resample this car's per-EPISODE actuator DR: speed regime (drag) + the
-        constant steering/speed bias (held for the whole episode)."""
+        constant steering/speed bias (held for the whole episode). The bias is scaled
+        by the current DR-warmup factor, so early (near-clean) episodes stay
+        survivable and the lean grows to full ±max only once the policy can drive."""
         if self._has_drag:
             self._drag_factor[car] = float(self._samp(self._drag_spec, self._noise_rng))
         if self._has_bias:
+            scale = self._dr_scale()
             self._act_bias[car, 0] = self._noise_rng.uniform(
-                -self._steer_bias_max, self._steer_bias_max)
+                -self._steer_bias_max, self._steer_bias_max) * scale
             self._act_bias[car, 1] = self._noise_rng.uniform(
-                -self._speed_bias_max, self._speed_bias_max)
+                -self._speed_bias_max, self._speed_bias_max) * scale
 
     def _to_engineering(self, action: np.ndarray, car: int = 0) -> np.ndarray:
         a = np.asarray(action, dtype=np.float32).copy()
@@ -167,9 +201,10 @@ class MultiCarVecEnv(VecEnv):
         if self._has_drag:   # per-episode speed regime: scale commanded speed
             a[1] = a[1] * self._drag_factor[car]
         if self._has_bias:   # per-episode constant lean (steering trim / motor offset)
-            a = a + self._act_bias[car]
+            a = a + self._act_bias[car]   # already DR-warmup-scaled at resample
         if self._act_noise is not None:  # additive per-step (symmetric) Gaussian jitter
-            a = a + self._act_noise * self._noise_rng.standard_normal(2).astype(np.float32)
+            a = a + (self._act_noise * self._dr_scale()
+                     * self._noise_rng.standard_normal(2).astype(np.float32))
         return np.clip(a, self._low, self._high)
 
     def _obs_from(self, raw_obs, info, car: int):
@@ -184,8 +219,9 @@ class MultiCarVecEnv(VecEnv):
         clean = self._feat_targets(params, self._prev_params[car]).astype(np.float32)
         if params:
             self._prev_params[car] = dict(params)
-        if self._feat_noise > 0:   # actor-robustness DR: noise the feature vector
-            noised = np.clip(clean + self._noise_rng.normal(0.0, self._feat_noise, clean.shape),
+        feat_noise = self._feat_noise * self._dr_scale()  # DR-warmup ramp
+        if feat_noise > 0:         # actor-robustness DR: noise the feature vector
+            noised = np.clip(clean + self._noise_rng.normal(0.0, feat_noise, clean.shape),
                              -1.0, 1.0).astype(np.float32)
         else:
             noised = clean
@@ -204,13 +240,15 @@ class MultiCarVecEnv(VecEnv):
         return np.stack(obs_list, axis=0)
 
     # ---- VecEnv interface -------------------------------------------- #
-    def _record_step(self, car: int, obs, params: Optional[dict]) -> None:
-        """Capture one camera frame + its feature target for the dataset (no-op
-        unless a recorder is attached). ``obs`` is this car's Dict camera obs."""
+    def _record_step(self, car: int, obs, params: Optional[dict],
+                     action: Optional[np.ndarray] = None) -> None:
+        """Capture one camera frame + its feature target (+ the policy's action)
+        for the dataset (no-op unless a recorder is attached). ``obs`` is this
+        car's Dict camera obs; ``action`` is the engineering-unit [steer, speed]."""
         if self._rec is None or not params:
             return
         try:
-            self._rec.record(car, obs[self._image_key], params)
+            self._rec.record(car, obs[self._image_key], params, action)
         except Exception:  # noqa: BLE001 — recording must never break the rollout
             pass
 
@@ -272,6 +310,7 @@ class MultiCarVecEnv(VecEnv):
         self._actions = np.asarray(actions, dtype=np.float32)
 
     def step_wait(self):
+        self._dr_steps += self.num_envs       # advance the DR-warmup ramp (timesteps)
         eng = [self._to_engineering(self._actions[i], i) for i in range(self.num_envs)]
         raw_obs, rewards, dones, infos = self._backend.step(eng)
         obs_out, info_out, rew_out = [], [], []
@@ -281,7 +320,7 @@ class MultiCarVecEnv(VecEnv):
             params = info.get("reward_params")
             # Record THIS step's frame + target before any auto-reset (the obs `o`
             # here is the real step observation; ``params`` its label).
-            self._record_step(i, o, params)
+            self._record_step(i, o, params, eng[i])
             # Per-car episode metrics (unified pipeline): accumulate this step.
             eval_r = self._record_metrics(i, params, rewards[i])
             # During eval, return the eval-reward (matches the single-car wrapper);
@@ -356,19 +395,25 @@ def multi_car(experiment) -> MultiCarVecEnv:
     if not isinstance(cfg, ContinuousActionSpaceConfig):
         raise TypeError("multi-car requires a ContinuousActionSpaceConfig action space")
     import os
-    # Gazebo Classic renders only 2 camera sensors per world: at n>=3 the extra
-    # cameras advertise their topic but never publish a frame (verified: racecar_0
-    # & racecar_1 at 15Hz, racecar_2 at 0Hz), and the blocking sensor read then
-    # log_and_exit()s the whole run ~120s in. Fail fast with the explanation rather
-    # than that cryptic crash. Feature obs (camera_obs=False) scales to n=8; for >2
-    # camera cars use separate processes. Override only if your renderer supports it.
+    # Camera multi-car is capped at 2 because the LAUNCH only spawns 2 car bodies
+    # (racetrack_with_racecar.launch hardcodes racecar_0/1 + car_node.py args="2");
+    # nothing spawns a 3rd body, so racecar_2's camera topic advertises but has NO
+    # publisher (0 Hz) and the agent's blocking sensor read log_and_exit()s ~120s in.
+    # This is a LAUNCH/CONFIG limit, NOT "Gazebo renders only 2 cameras" (that earlier
+    # claim was a misdiagnosis — see docs/reports/status-2026-06-28.md). Feature obs
+    # (camera_obs=False) scales to n=8 only because a missing model's STATE read
+    # doesn't block (phantom agents). Raising it needs generated racecar_2..N launch
+    # blocks; the real residual limit is then Gazebo's single OGRE render thread
+    # (graceful fps/RTF degradation past 2, not a crash). Fail fast meanwhile.
     if bool(experiment.camera_obs) and int(experiment.n_cars) > 2 \
             and os.getenv("GYM_DR_ALLOW_CAMERA_NCARS") != "1":
         raise ValueError(
-            f"camera_obs multi-car is capped at n_cars=2 on Gazebo Classic (only 2 "
-            f"camera sensors render per world); got n_cars={experiment.n_cars}. Use "
-            f"camera_obs=False (feature obs scales to n=8), run >2 camera cars as "
-            f"separate processes, or set GYM_DR_ALLOW_CAMERA_NCARS=1 to override.")
+            f"camera_obs multi-car is capped at n_cars=2: the launch only spawns 2 car "
+            f"bodies (racetrack_with_racecar.launch), so car {experiment.n_cars - 1}'s "
+            f"camera has no publisher and the blocking read aborts. Add racecar_2..N "
+            f"launch blocks to raise it, use camera_obs=False (feature scales to n=8), "
+            f"run >2 camera cars as separate processes, or set "
+            f"GYM_DR_ALLOW_CAMERA_NCARS=1 to override.")
     # Per-car track list (the generalization engine): GYM_DR_DEMO_WORLDS is a
     # comma-separated list of track names, one per car — each car drives its own
     # track instance, so N cars train across N different tracks in one world.
@@ -450,5 +495,9 @@ def multi_car(experiment) -> MultiCarVecEnv:
         feature_targets=_ftargets, feature_dim=_fdim,
         feature_noise=spec_bounds(getattr(dr, "feature_noise", 0.0))[1] if dr else 0.0,
         feature_asym=(os.getenv("GYM_DR_ASYM_CRITIC") == "1" and not bool(experiment.camera_obs)),
+        # Linear DR warmup (the multi-car ADR substitute): ramp every magnitude knob
+        # 0 -> full over the first N timesteps so the policy can learn to drive before
+        # the unobservable bias / feature noise reach full strength. Forwarded by app.py.
+        dr_warmup_steps=int(os.getenv("GYM_DR_DR_WARMUP_STEPS", "0") or 0),
         recorder=recorder, car_tracks=list(backend.worlds), dr_meta=dr_meta,
     )

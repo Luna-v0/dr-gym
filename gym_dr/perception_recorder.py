@@ -60,7 +60,7 @@ def _free_gb(path: Path) -> float:
 
 
 class _CarBuffer:
-    __slots__ = ("frames", "targets", "diag", "prev", "track", "phase", "ep_id", "meta")
+    __slots__ = ("frames", "targets", "diag", "actions", "prev", "track", "phase", "ep_id", "meta")
 
     def __init__(self) -> None:
         self.reset(track="", phase="train", ep_id=-1, meta={})
@@ -69,6 +69,7 @@ class _CarBuffer:
         self.frames: list = []
         self.targets: list = []
         self.diag: list = []
+        self.actions: list = []
         self.prev: Optional[dict] = None
         self.track = track
         self.phase = phase
@@ -114,11 +115,15 @@ class PerceptionRecorder:
         self._buf[car].reset(track=track, phase=self.phase,
                              ep_id=self._ep_counter, meta=meta)
 
-    def record(self, car: int, frame_gray: np.ndarray, params: dict) -> None:
+    def record(self, car: int, frame_gray: np.ndarray, params: dict,
+               action: Optional[np.ndarray] = None) -> None:
         """Append one step's frame + derived feature target for ``car``.
 
         ``frame_gray`` is the newest grayscale frame ``(H, W)`` uint8 (the policy's
-        stack is the last 4 of these). ``params`` is the car's ``reward_params``."""
+        stack is the last 4 of these). ``params`` is the car's ``reward_params``.
+        ``action`` is the policy's output ``[steering_deg, speed_m_s]`` for that
+        step (the "model output") — stored so the dataset also supports
+        camera->action behavioural cloning / analysis."""
         if not (0 <= car < self.n_cars):
             return
         b = self._buf[car]
@@ -141,6 +146,9 @@ class PerceptionRecorder:
         b.frames.append(frame)
         b.targets.append(tgt)
         b.diag.append(diag)
+        b.actions.append(
+            np.asarray(action, dtype=np.float32).reshape(-1)[:2]
+            if action is not None else np.zeros(2, dtype=np.float32))
         if params:
             b.prev = dict(params)
 
@@ -183,8 +191,10 @@ class PerceptionRecorder:
                 frames=np.stack(b.frames, axis=0),
                 targets=np.stack(b.targets, axis=0),
                 diag=np.stack(b.diag, axis=0),
+                actions=np.stack(b.actions, axis=0),     # policy output [steer, speed]
                 features=np.array(self.features),
                 diag_cols=np.array(_DIAG_COLS),
+                action_cols=np.array(["steering_deg", "speed_m_s"]),
                 meta=np.array(json.dumps(b.meta)),
             )
             os.replace(tmp, final)
