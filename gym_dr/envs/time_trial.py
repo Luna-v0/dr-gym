@@ -147,16 +147,21 @@ def time_trial(experiment: "ExperimentConfig") -> Any:
         # exploration on every action dim. See docs/reports/q1-generalization.md.
         if getattr(cfg, "normalize_actions", False):
             env = NormalizeActions(env)
-    env = GrayscaleObs(env)
-    # Observation-noise DR perturbs the grayscale frames the policy sees, so it
-    # wraps OUTSIDE GrayscaleObs.
-    if dr is not None and dr.has_obs_noise:
-        env = ObservationNoise(
-            env, gaussian_std=spec_bounds(dr.obs_gaussian)[1],
-            brightness_jitter=spec_bounds(dr.obs_brightness)[1],
-            contrast=spec_bounds(dr.obs_contrast)[1], gamma=spec_bounds(dr.obs_gamma)[1],
-            seed=dr.seed, adr_state=adr_state,
-        )
+    # Grayscale + observation-noise apply ONLY to a camera observation. The
+    # feature/camera-off path has no camera sensor (CompositeSensor returns {}),
+    # so skip both there (GrayscaleObs would fail on the missing camera key).
+    has_camera = any("CAMERA" in s.upper() or s.upper() == "STEREO" for s in cfg.sensor)
+    if has_camera:
+        env = GrayscaleObs(env)
+        # Observation-noise DR perturbs the grayscale frames the policy sees, so it
+        # wraps OUTSIDE GrayscaleObs.
+        if dr is not None and dr.has_obs_noise:
+            env = ObservationNoise(
+                env, gaussian_std=spec_bounds(dr.obs_gaussian)[1],
+                brightness_jitter=spec_bounds(dr.obs_brightness)[1],
+                contrast=spec_bounds(dr.obs_contrast)[1], gamma=spec_bounds(dr.obs_gamma)[1],
+                seed=dr.seed, adr_state=adr_state,
+            )
     # random_start / random_direction are now honoured via the controller config
     # above (deepracer-env RANDOM_START / RANDOM_DIRECTION reset modes) — needs
     # the rebuilt sim image. See docs/reports/domain-randomization.md.

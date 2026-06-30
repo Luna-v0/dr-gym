@@ -120,7 +120,8 @@ def _build_run_cmd(
             )
         argv += [
             "-v",
-            f"{src}:/usr/local/lib/python3.8/dist-packages/deepracer_env:ro",
+            # ROS 2 Lyrical base ships Python 3.14 (was 3.8 on the Noetic base).
+            f"{src}:/usr/local/lib/python3.14/dist-packages/deepracer_env:ro",
         ]
         # Also overlay the catkin `simulation` package's launch + urdf (which live
         # OUTSIDE the python package, in the image's catkin share dir) so sim-asset
@@ -129,11 +130,23 @@ def _build_run_cmd(
         repo_root = src.parent
         sim_launch = repo_root / "simulation" / "src" / "deepracer_simulation_environment" / "launch"
         sim_urdf = repo_root / "simulation" / "urdf"
-        share = "/opt/simapp/deepracer_simulation_environment/share/deepracer_simulation_environment"
+        # ROS 2 colcon --merge-install layout: share lives at <install>/share/<pkg>
+        # (the Noetic catkin path was deepracer_simulation_environment/share/...).
+        share = "/opt/simapp/share/deepracer_simulation_environment"
         if sim_launch.is_dir():
             argv += ["-v", f"{sim_launch}:{share}/launch:ro"]
         if sim_urdf.is_dir():
             argv += ["-v", f"{sim_urdf}:{share}/urdf:ro"]
+    # sb3-contrib (RecurrentPPO / LSTM policies) is NOT in the base image; mount the
+    # host venv's package into the container's dist-packages so the LSTM architecture
+    # arm can import it without rebuilding the image. No-op if not installed on the host.
+    try:
+        import sb3_contrib as _sb3c
+
+        _contrib_dir = Path(_sb3c.__file__).resolve().parent
+        argv += ["-v", f"{_contrib_dir}:/usr/local/lib/python3.14/dist-packages/sb3_contrib:ro"]
+    except Exception:  # noqa: BLE001
+        pass
     if use_gpu:
         argv.extend(["--gpus", "all"])
     for host_port, container_port in published_ports or []:

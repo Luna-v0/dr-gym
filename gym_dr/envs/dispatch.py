@@ -38,7 +38,12 @@ def feature_time_trial(experiment: "ExperimentConfig") -> Any:
         captured.update(params)
         return inner_reward(params)
 
-    env = time_trial(dataclasses.replace(experiment, reward=_tap))
+    # Feature obs reads reward_params (pose/track position), NOT pixels, so drop
+    # the camera sensor: the base env's CompositeSensor then returns {} (no
+    # blocking image read at reset) and nothing renders — mirrors the multi-car
+    # feature path (gym_dr/envs/multi_car.py:432).
+    cam_free = dataclasses.replace(experiment.action_space, sensor=[])
+    env = time_trial(dataclasses.replace(experiment, reward=_tap, action_space=cam_free))
     # GYM_DR_FEATURE_SET=actor_extended -> the 11-feature actor vector (9 ⊕
     # curvature_ahead, nearest_object_dist); default keeps the validated 9.
     # feature_noise (DR) perturbs the actor's vector; GYM_DR_ASYM_CRITIC=1 makes the
