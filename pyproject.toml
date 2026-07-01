@@ -93,7 +93,7 @@ conflicts = [
 deepracer-utils = { git = "https://github.com/Luna-v0/deepracer-utils.git", branch = "master" }
 
 [tool.setuptools]
-packages = ["gym_dr"]
+packages = ["gym_dr", "gym_dr.analysis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
