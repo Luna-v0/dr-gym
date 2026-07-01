@@ -12,6 +12,8 @@ Both share ``_build_run_cmd`` for mount + env layout.
 """
 from __future__ import annotations
 
+import atexit
+import contextlib
 import math
 import os
 import signal
@@ -31,6 +33,57 @@ SIM_RESTART_RC = 75
 _WATCHDOG_ON = os.getenv("GYM_DR_WATCHDOG", "1") != "0"
 _WATCHDOG_TIMEOUT = int(os.getenv("GYM_DR_WATCHDOG_TIMEOUT", "600"))
 _WATCHDOG_BOOT_GRACE = int(os.getenv("GYM_DR_WATCHDOG_BOOT_GRACE", "360"))
+
+
+# -------------------------- pipeline teardown ------------------------------ #
+# Usability (Task 8): killing the host process must tear the WHOLE pipeline down
+# — every spawned Docker container, not just the one currently being waited on —
+# so a single Ctrl-C never leaves an orphaned Gazebo running. Every spawner
+# registers its container name here; a signal handler (installed around the wait
+# loops) docker-kills them ALL and then re-raises so the host exits promptly, and
+# an atexit backstop catches any container still registered on a clean/abnormal
+# interpreter exit.
+_ACTIVE_CONTAINERS: "set[str]" = set()
+
+
+def _register(name: str) -> None:
+    _ACTIVE_CONTAINERS.add(name)
+
+
+def _unregister(name: str) -> None:
+    _ACTIVE_CONTAINERS.discard(name)
+
+
+def _kill_all_active() -> None:
+    """docker-kill every currently-registered container and clear the registry."""
+    for name in list(_ACTIVE_CONTAINERS):
+        _docker_kill(name)
+        _ACTIVE_CONTAINERS.discard(name)
+
+
+atexit.register(_kill_all_active)  # backstop for any leftover on interpreter exit
+
+
+@contextlib.contextmanager
+def _signal_teardown():
+    """Within this block, SIGINT/SIGTERM docker-kill ALL active containers and
+    then propagate as ``KeyboardInterrupt`` — so one Ctrl-C stops the containers
+    AND the host, instead of killing one container and continuing. Previous
+    handlers are restored on exit."""
+
+    def handler(signum, frame):
+        _kill_all_active()
+        signal.signal(signal.SIGINT, prev_int)
+        signal.signal(signal.SIGTERM, prev_term)
+        raise KeyboardInterrupt()
+
+    prev_int = signal.signal(signal.SIGINT, handler)
+    prev_term = signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, prev_int)
+        signal.signal(signal.SIGTERM, prev_term)
 
 
 def _docker_kill(name: str) -> None:
@@ -184,35 +237,30 @@ def spawn_training_chunk(
     print(f"[train] spawning {container_name}: {' '.join(argv)}", flush=True)
 
     _docker_rm_f(container_name)  # clear any orphan with this name first
+    _register(container_name)
     proc = subprocess.Popen(argv, stdout=sys.stdout, stderr=sys.stderr)
-
-    def kill(_signum=None, _frame=None) -> None:
-        _docker_kill(container_name)
-
-    prev_int = signal.signal(signal.SIGINT, kill)
-    prev_term = signal.signal(signal.SIGTERM, kill)
     started = time.monotonic()
     try:
-        if not _WATCHDOG_ON:
-            return proc.wait()
-        while True:
-            try:
-                return proc.wait(timeout=15)        # exited on its own
-            except subprocess.TimeoutExpired:
-                pass
-            if _is_hung(proc, host_hb, started):
-                print(f"[watchdog] {container_name} hung (no heartbeat); killing + "
-                      f"requesting restart", flush=True)
-                _docker_kill(container_name)
+        with _signal_teardown():  # Ctrl-C -> kill this (+ any sibling) container, exit
+            if not _WATCHDOG_ON:
+                return proc.wait()
+            while True:
                 try:
-                    proc.wait(timeout=30)
+                    return proc.wait(timeout=15)    # exited on its own
                 except subprocess.TimeoutExpired:
                     pass
-                return SIM_RESTART_RC
+                if _is_hung(proc, host_hb, started):
+                    print(f"[watchdog] {container_name} hung (no heartbeat); killing + "
+                          f"requesting restart", flush=True)
+                    _docker_kill(container_name)
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    return SIM_RESTART_RC
     finally:
+        _unregister(container_name)
         host_hb.unlink(missing_ok=True)
-        signal.signal(signal.SIGINT, prev_int)
-        signal.signal(signal.SIGTERM, prev_term)
 
 
 def spawn_workers(
@@ -236,13 +284,6 @@ def spawn_workers(
 
     workers: dict[int, dict] = {}
 
-    def kill_outstanding(_signum=None, _frame=None) -> None:
-        for w in workers.values():
-            _docker_kill(w["name"])
-
-    signal.signal(signal.SIGINT, kill_outstanding)
-    signal.signal(signal.SIGTERM, kill_outstanding)
-
     def launch(idx: int) -> dict:
         name = f"gym-dr-hpo-{study_name}-{idx}"
         host_hb, container_hb = _heartbeat_paths(artifacts_dir, name)
@@ -256,6 +297,7 @@ def spawn_workers(
         print(f"[hpo] spawning {name}: {' '.join(argv)}", flush=True)
         _docker_rm_f(name)  # clear any orphan/leftover with this name first
         proc = subprocess.Popen(argv, stdout=sys.stdout, stderr=sys.stderr)
+        _register(name)
         return {"idx": idx, "name": name, "proc": proc, "hb": host_hb,
                 "started": time.monotonic(), "restarts": 0}
 
@@ -265,6 +307,7 @@ def spawn_workers(
     overall_rc = 0
     done: set[int] = set()
     try:
+      with _signal_teardown():  # Ctrl-C -> kill ALL workers, exit
         while len(done) < n_parallel:
             time.sleep(15)
             for idx, w in list(workers.items()):
@@ -298,6 +341,7 @@ def spawn_workers(
                         done.add(idx)
     finally:
         for w in workers.values():
+            _unregister(w["name"])
             w["hb"].unlink(missing_ok=True)
     return overall_rc
 
