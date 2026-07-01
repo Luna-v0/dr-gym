@@ -46,6 +46,7 @@ from gym_dr import (
     FixedWorlds,
     TrackingConfig,
     TrainingConfig,
+    OfftrackRate,
     anti_zigzag,
     progress_safe,
     time_trial,
@@ -174,9 +175,7 @@ experiment = ExperimentConfig(
         # TensorBoard's Images tab. See gym_dr/trainers/sb3/plots.py.
         eval_path_plots=True,
         # --- The early-stop heuristic this experiment demonstrates ---
-        early_stop_enabled=True,
-        early_stop_max_offtrack_rate=MAX_OFFTRACK_RATE,
-        early_stop_patience=PATIENCE,
+        early_stop=OfftrackRate(max_offtrack_rate=MAX_OFFTRACK_RATE, patience=PATIENCE),
     ),
     tracking=TrackingConfig(mlflow_experiment=NAME),
     # Watch the car train over VNC: connect a client to vnc://localhost:5900.

@@ -21,7 +21,7 @@ _cfg = h.base.with_overrides(name="arch_lstm_repro", **h.search_space(_FT("lstm"
 _cfg = dataclasses.replace(
     _cfg,
     training=dataclasses.replace(_cfg.training, total_timesteps=2000, eval_freq=10 ** 9,
-                                 checkpoint_freq=10 ** 9, early_stop_enabled=False),
+                                 checkpoint_freq=10 ** 9),
     environment=dataclasses.replace(
         _cfg.environment,
         curriculum=dataclasses.replace(_cfg.environment.curriculum, n_chunks=1,

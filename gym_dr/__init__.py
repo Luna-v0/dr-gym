@@ -29,8 +29,19 @@ from gym_dr.config import (
 )
 from gym_dr.envs import time_trial
 from gym_dr.domain_randomization import ADR, DomainRandomization
+from gym_dr.early_stopping import (
+    AllOf,
+    AnyOf,
+    CleanCompletion,
+    EarlyStopStrategy,
+    MetricThreshold,
+    OfftrackRate,
+    RewardThreshold,
+)
 from gym_dr.environment import CameraObs, EnvironmentConfig, FeatureObs, SafeRL
+from gym_dr.pipeline import Stage, compose, stage
 from gym_dr.randomization import Choice, Range
+from gym_dr.search import Categorical, Fixed, Float, Int, SearchSpace
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
 from gym_dr.seeding import ReplicateSeeds, SeedManager
 from gym_dr.rewards import (
@@ -62,6 +73,22 @@ __all__ = [
     "DiscreteActionSpaceConfig",
     "DomainRandomization",
     "ADR",
+    # Pipeline + early-stopping + hyperparameter-search primitives (Task-1/8 refactor)
+    "Stage",
+    "compose",
+    "stage",
+    "EarlyStopStrategy",
+    "OfftrackRate",
+    "MetricThreshold",
+    "RewardThreshold",
+    "CleanCompletion",
+    "AllOf",
+    "AnyOf",
+    "SearchSpace",
+    "Fixed",
+    "Float",
+    "Int",
+    "Categorical",
     "EnvironmentConfig",
     "CameraObs",
     "FeatureObs",

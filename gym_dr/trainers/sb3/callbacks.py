@@ -148,68 +148,60 @@ def update_training_status(run_dir: Path, status: str, extra: dict[str, Any] | N
     )
 
 
-def _mastery_met(training: Any, n_offtrack: int, n_total: int) -> bool:
-    """Has the car *mastered* the track in this eval round?
-
-    Mastery = the fraction of the round's eval episodes that ended with the car
-    off the track is within ``training.early_stop_max_offtrack_rate`` (``0.0`` =
-    never left the track). Returns ``False`` when early stop is disabled or no
-    eval episodes ran.
-    """
-    if not getattr(training, "early_stop_enabled", False) or n_total <= 0:
-        return False
-    return (n_offtrack / n_total) <= float(training.early_stop_max_offtrack_rate)
-
-
 class _EarlyStopMixin:
-    """Track-mastery early stop, shared by the eval callbacks.
+    """Pluggable early stop, shared by the eval callbacks.
 
-    Both eval callbacks already tally the eval episodes that ended off-track; this
-    turns that tally into a stop decision. When the car holds mastery (see
-    :func:`_mastery_met`) for ``early_stop_patience`` consecutive eval rounds, the
-    host ``_on_step`` returns ``False`` — the same early-exit SB3 honours for
-    ``WallClockLimitCallback`` — which ends the chunk's ``model.learn`` and hands
-    control back to ``Sb3Trainer.fit`` (advancing the rotation, or ending a
-    single-track run). The streak resets per chunk via ``_on_training_start`` so
-    mastering one track never pre-credits the next.
+    Each eval round produces aggregate metrics (off-track rate, clean-completion
+    rate, mean reward, …). This mixin hands them to an
+    :class:`gym_dr.early_stopping.EarlyStopController` built from
+    ``ctx.training.early_stop``; when the strategy qualifies for its ``patience``
+    consecutive rounds, the host ``_on_step`` returns ``False`` — the same
+    early-exit SB3 honours for ``WallClockLimitCallback`` — which ends the chunk's
+    ``model.learn`` and hands control back to ``Sb3Trainer.fit`` (advancing the
+    rotation, or ending a single-track run). The controller's streak resets per
+    chunk via ``_on_training_start`` so mastering one track never pre-credits the
+    next. ``early_stop=None`` disables it (the controller no-ops).
     """
 
     def _es_init(self) -> None:
-        self._es_streak = 0
+        self._es_ctrl = None  # (re)built per chunk in _on_training_start
         self.mastered = False
         self.early_stops = 0  # non-reset: how many chunks this instance stopped
 
     def _on_training_start(self) -> None:
         super()._on_training_start()  # type: ignore[misc]
-        self._es_streak = 0
+        from gym_dr.early_stopping import EarlyStopController
+
+        self._es_ctrl = EarlyStopController(
+            self._ctx.training.early_stop  # type: ignore[attr-defined]
+        )
         self.mastered = False
 
-    def _apply_early_stop(self, n_offtrack: int, n_total: int) -> bool:
-        """Fold this eval round into the mastery streak; return ``True`` when the
-        chunk should stop now."""
-        training = self._ctx.training  # type: ignore[attr-defined]
-        if not getattr(training, "early_stop_enabled", False):
+    def _apply_early_stop(self, metrics: "dict[str, float]") -> bool:
+        """Fold this eval round's aggregate metrics into the strategy; return
+        ``True`` when the chunk should stop now."""
+        ctrl = getattr(self, "_es_ctrl", None)
+        if ctrl is None or not ctrl.enabled:
             return False
-        if _mastery_met(training, n_offtrack, n_total):
-            self._es_streak += 1
-        else:
-            self._es_streak = 0
-        if self._es_streak < max(1, int(getattr(training, "early_stop_patience", 1))):
+        if not ctrl.update(metrics):
             return False
         self.mastered = True
         self.early_stops += 1
-        rate = (n_offtrack / n_total) if n_total else 0.0
         steps = int(self.num_timesteps)  # type: ignore[attr-defined]
         print(
-            f"[early-stop] track mastered at {steps} steps "
-            f"(eval off-track rate {rate:.2f} <= "
-            f"{training.early_stop_max_offtrack_rate}); ending chunk",
+            f"[early-stop] {ctrl.strategy.describe()} met at {steps} steps; "
+            f"ending chunk",
             flush=True,
         )
+        logged = {
+            k: float(metrics[k])
+            for k in ("offtrack_rate", "clean_completion_rate", "mean_reward")
+            if k in metrics
+        }
         update_training_status(
             self._ctx.run_dir,  # type: ignore[attr-defined]
             "early_stopped",
-            {"timesteps_completed": steps, "eval_offtrack_rate": rate},
+            {"timesteps_completed": steps, **logged},
         )
         return True
 
@@ -361,9 +353,14 @@ class CtxEvalCallback(_EarlyStopMixin, EvalCallback):
                         self._ctx.action_space,
                     )
             self._ctx.report_eval(float(self.last_mean_reward), int(self.num_timesteps))
-            # Track-mastery early stop: end the chunk once the car stays on the
-            # track across this eval round (advances the rotation / ends the run).
-            if self._apply_early_stop(self._offtrack_resets, self.n_eval_episodes):
+            # Pluggable early stop: end the chunk once the configured strategy
+            # qualifies on this eval round (advances the rotation / ends the run).
+            if self._apply_early_stop({
+                "offtrack_rate": self._offtrack_resets / n_eps,
+                "clean_completion_rate": self._clean / n_eps,
+                "completion_rate": self._completed / n_eps,
+                "mean_reward": float(self.last_mean_reward),
+            }):
                 return False
         return proceed
 
@@ -566,13 +563,21 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
             self._save_best()
 
         self._ctx.report_eval(agg, int(self.num_timesteps))
-        # Track-mastery early stop, measured across what was actually evaluated this
+        # Pluggable early stop, measured across what was actually evaluated this
         # round (held-out worlds when swappable; the single current-tracks eval for
         # multi-car) — NOT len(eval_worlds), which multi-car never iterates.
         total_eps = self.n_eval_episodes * max(1, len(counts_per_world))
-        if self._apply_early_stop(
-            sum(c["n"] for c in counts_per_world.values()), total_eps
-        ):
+        total_off = sum(c["n"] for c in counts_per_world.values())
+        es_metrics: "dict[str, float]" = {
+            "offtrack_rate": (total_off / total_eps) if total_eps else 1.0,
+            "mean_reward": agg,
+        }
+        if counts_per_world:
+            es_metrics["clean_completion_rate"] = clean_rate
+            es_metrics["completion_rate"] = float(
+                np.mean([c["completed"] / n_eps for c in counts_per_world.values()])
+            )
+        if self._apply_early_stop(es_metrics):
             return False
         return True
 

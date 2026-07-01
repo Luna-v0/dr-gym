@@ -29,7 +29,7 @@ os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"   # 11-feature actor vector 
 from gym_dr import (                                       # noqa: E402
     ACL, ADR, ContinuousActionSpaceConfig, EnvironmentConfig, ExperimentConfig,
     FeatureObs, Range, Sb3Trainer, TraceConfig, TrackingConfig, TrainingConfig,
-    TRACKS, centerline_quadratic, clean_completion,
+    TRACKS, centerline_quadratic, clean_completion, OfftrackRate,
 )
 from gym_dr.asymmetric import AsymmetricActorCriticPolicy            # noqa: E402
 from gym_dr.envs.dispatch import build_env                          # noqa: E402
@@ -95,7 +95,7 @@ experiment = ExperimentConfig(
         total_timesteps=CHUNK_STEPS * N_CHUNKS, checkpoint_freq=CHUNK_STEPS,
         checkpoint_keep_last=3, eval_freq=CHUNK_STEPS, n_eval_episodes=5,
         rtf_override=60, eval_path_plots=True,
-        early_stop_enabled=True, early_stop_max_offtrack_rate=0.10, early_stop_patience=4),
+        early_stop=OfftrackRate(max_offtrack_rate=0.10, patience=4)),
     tracking=TrackingConfig(mlflow_experiment=NAME),
     trace=TraceConfig(enabled=True),
     seed=42, use_gpu=False,

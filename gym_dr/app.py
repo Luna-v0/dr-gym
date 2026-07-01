@@ -94,8 +94,17 @@ def train(experiment: ExperimentConfig) -> Any:
         # Python traceback). The chunk's data + checkpoints are already flushed,
         # so hard-exit to skip that buggy native teardown and return a clean rc.
         # ONLY for a single-chunk train container — NOT the HPO worker
-        # (GYM_DR_WORKER), which loops many trials in one process.
-        if not os.getenv("GYM_DR_WORKER"):
+        # (GYM_DR_WORKER, loops many trials in one process), NOT an explicit
+        # opt-out (GYM_DR_NO_HARD_EXIT), and NOT under pytest (PYTEST_CURRENT_TEST
+        # is set per test): os._exit(0) would kill pytest mid-run before it can
+        # run post-train() assertions or write its report, silently masking
+        # failures across the whole in-process suite.
+        hard_exit = (
+            not os.getenv("GYM_DR_WORKER")
+            and not os.getenv("GYM_DR_NO_HARD_EXIT")
+            and "PYTEST_CURRENT_TEST" not in os.environ
+        )
+        if hard_exit:
             import sys
             sys.stdout.flush()
             sys.stderr.flush()

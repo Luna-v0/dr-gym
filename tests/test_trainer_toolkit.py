@@ -76,12 +76,12 @@ def test_evaluate_held_out_swaps_worlds(tmp_path):
     assert agg["clean_completion_rate"] == 1.0
 
 
-def test_custom_trainer_satisfies_protocol(tmp_path):
-    class MyTrainer:
+def test_custom_trainer_extends_base(tmp_path):
+    class MyTrainer(Trainer):
         def fit(self, env, ctx):
             ctx.save_model(lambda p: p.write_bytes(b"x"), name="initial_model")
             return TrainResult(final_eval_reward=1.0)
 
-    assert isinstance(MyTrainer(), Trainer)  # runtime_checkable Protocol
+    assert isinstance(MyTrainer(), Trainer)  # extends the Trainer ABC
     r = MyTrainer().fit(_StubEnv({}), _ctx(tmp_path))
     assert r.final_eval_reward == 1.0

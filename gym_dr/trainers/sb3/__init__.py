@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from gym_dr.trainers.base import TrainingContext, TrainResult
+from gym_dr.trainers.base import Trainer, TrainingContext, TrainResult
 from gym_dr.trainers.sb3.algorithms import load_model, make_model
 from gym_dr.trainers.sb3.callbacks import (
     CtxCheckpointCallback,
@@ -26,7 +26,7 @@ from gym_dr.trainers.sb3.callbacks import (
 
 
 @dataclass(frozen=True)
-class Sb3Trainer:
+class Sb3Trainer(Trainer):
     """Stable-Baselines3 trainer — the default ``Trainer`` implementation.
 
     Builds an SB3 model via the algorithm registry, wires per-chunk callbacks
@@ -377,8 +377,9 @@ class Sb3Trainer:
                 "time_limit_reached": bool(
                     wall_clock_callback and wall_clock_callback.time_limit_reached
                 ),
-                # True if any chunk ended early because the car mastered the track
-                # (stayed on it during evaluation). See TrainingConfig.early_stop_*.
+                # True if any chunk ended early because the configured
+                # EarlyStopStrategy qualified during evaluation. See
+                # TrainingConfig.early_stop.
                 "early_stopped": bool(getattr(eval_callback, "early_stops", 0)),
                 "elapsed_seconds": int(time.monotonic() - started_at),
                 "timesteps_completed": int(model.num_timesteps),

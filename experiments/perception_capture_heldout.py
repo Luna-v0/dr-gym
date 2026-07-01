@@ -62,7 +62,7 @@ def build_capture(group: tuple[str, ...], resume: str | None):
         exp.trainer, kwargs={**exp.trainer.kwargs, "learning_rate": 0.0})
     training = dataclasses.replace(
         exp.training, total_timesteps=CAPTURE_STEPS, resume_from=resume,
-        eval_freq=10 ** 12, early_stop_enabled=False)
+        eval_freq=10 ** 12)
     env = dataclasses.replace(
         exp.environment,
         curriculum=dataclasses.replace(exp.environment.curriculum, eval_worlds=[]))

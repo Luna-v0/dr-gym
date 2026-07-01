@@ -27,9 +27,10 @@ Minimal custom trainer:
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from gym_dr.action_space import ActionSpaceConfig
@@ -296,15 +297,24 @@ class TrainingContext:
         return agg
 
 
-@runtime_checkable
-class Trainer(Protocol):
-    """Anything with this method shape is a Trainer.
+class Trainer(ABC):
+    """The abstract base every algorithm extends — the "bring your own algorithm"
+    seam (no Stable-Baselines lock-in).
 
-    The contract: take a gym env and a TrainingContext, train, return a
-    TrainResult. The orchestrator handles run-dir setup, MLflow lifecycle,
-    artifact archival, and status-JSON updates around this call.
+    Subclass it and implement :meth:`fit`: take a gym env and a
+    :class:`TrainingContext`, train, return a :class:`TrainResult`. The
+    orchestrator handles run-dir setup, MLflow lifecycle, artifact archival, and
+    status-JSON updates around the call, and ``TrainingContext`` hands you the
+    whole ecosystem (TensorBoard + MLflow logging, checkpointing with the
+    DeepRacer metadata sidecar, the held-out eval protocol, Optuna pruning) so a
+    custom loop reuses all of it — see ``experiments/custom_trainer_example.py``.
+
+    ``Sb3Trainer`` (SB3) and ``FsrlTrainer`` (safe-RL) are the shipped adapters;
+    a pure-PyTorch trainer that drives its own rollout loop via a
+    ``gym_dr.pipeline.Stage`` is equally first-class.
     """
 
+    @abstractmethod
     def fit(self, env: Any, ctx: TrainingContext) -> TrainResult:
         """Train against ``env`` until completion or pruning.
 

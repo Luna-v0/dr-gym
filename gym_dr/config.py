@@ -24,6 +24,7 @@ from gym_dr.object_avoidance import ObjectAvoidanceConfig
 from gym_dr.worlds import FixedWorlds, WorldStrategy
 
 if TYPE_CHECKING:
+    from gym_dr.early_stopping import EarlyStopStrategy
     from gym_dr.trainers.base import Trainer
 
 
@@ -110,29 +111,24 @@ class TrainingConfig:
     path. The geometry comes straight from the env's reward params
     (``x``/``y``/``waypoints``/``track_width``) — no DeepRacerEnv change needed."""
 
-    early_stop_enabled: bool = False
-    """Master switch for the track-mastery early stop. When ``True``, the eval
-    callback ends the current chunk's ``model.learn`` as soon as the policy
-    *masters* the track during evaluation (see ``early_stop_max_offtrack_rate``).
-    In a multi-world rotation that hands off to the next track; in a single-track
-    run it ends the experiment. Off by default — runs train the full
-    ``total_timesteps`` / ``chunk_steps`` regardless of how well the car drives."""
+    early_stop: "EarlyStopStrategy | None" = None
+    """Interchangeable early-stopping strategy (``gym_dr.early_stopping``), or
+    ``None`` (default) to train the full ``total_timesteps`` / ``chunk_steps``.
 
-    early_stop_max_offtrack_rate: float = 0.0
-    """Mastery threshold: stop early when the fraction of an evaluation round's
-    episodes that ended with the car *off the track* is ``<=`` this value.
-    ``0.0`` (default) is strict — the car must complete every eval episode
-    without leaving the track; ``0.5`` allows up to half of them to track-out.
-    Measured over all ``n_eval_episodes`` (× the number of held-out eval worlds,
-    when an ``OrderedSplit`` eval set is configured). Only consulted when
-    ``early_stop_enabled``."""
-
-    early_stop_patience: int = 1
-    """Number of *consecutive* qualifying eval rounds required before stopping.
-    ``1`` (default) stops on the first eval round that meets the threshold; raise
-    it to demand the car hold mastery across several evals before advancing. The
-    streak resets at the start of each chunk (so mastering one track does not
-    pre-credit the next) and whenever an eval round fails the threshold."""
+    A strategy is a frozen, HPO-sweepable object that decides — from an eval
+    round's aggregate metrics (``offtrack_rate``, ``clean_completion_rate``,
+    ``mean_reward``, …) — whether to end the current chunk early (advancing a
+    multi-world rotation, or ending a single-track run). The historical
+    track-mastery default is ``OfftrackRate(max_offtrack_rate=0.0, patience=1)``
+    (stop the first eval round the car completes without leaving the track).
+    Others: ``CleanCompletion(min_rate=1.0, patience=2)``,
+    ``RewardThreshold(min_reward=...)``,
+    ``MetricThreshold(metric=..., threshold=..., mode="max"|"min")``, and the
+    ``AllOf``/``AnyOf`` combinators. The eval callback owns an
+    ``EarlyStopController`` that requires the strategy's ``patience`` consecutive
+    qualifying rounds and resets the streak at the start of each chunk (so
+    mastering one track never pre-credits the next). Sweep e.g.
+    ``training.early_stop.max_offtrack_rate`` via HPO overrides."""
 
 
 @dataclass(frozen=True)

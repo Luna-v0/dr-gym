@@ -38,7 +38,7 @@ from gym_dr import (                                              # noqa: E402
     ADR, ContinuousActionSpaceConfig, CameraObs, EnvironmentConfig,
     ExperimentConfig, OrderedSplit, Range, Sb3Trainer, TraceConfig,
     TrackingConfig, TrainingConfig, clean_completion, progress_per_step,
-    existing_tracks, train,
+    existing_tracks, train, OfftrackRate,
 )
 from gym_dr.app import train as _train                           # noqa: E402  (host loop calls this)
 from gym_dr.envs.dispatch import build_env                       # noqa: E402
@@ -202,8 +202,7 @@ def build_experiment(group: tuple[str, ...], resume: str | None) -> ExperimentCo
             resume_from=resume, rtf_override=60, eval_path_plots=True,
             # Per-chunk mastery early-stop: stop a pair once its off-track rate stays
             # <=10% for 3 consecutive eval rounds (don't over-train solved pairs).
-            early_stop_enabled=(not SMOKE), early_stop_max_offtrack_rate=0.10,
-            early_stop_patience=3),
+            early_stop=(OfftrackRate(max_offtrack_rate=0.10, patience=3) if not SMOKE else None)),
         tracking=TrackingConfig(mlflow_experiment=NAME),
         trace=TraceConfig(enabled=False),         # the perception recorder is the dataset
         seed=42, use_gpu=True,

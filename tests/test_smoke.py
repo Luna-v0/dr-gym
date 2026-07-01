@@ -23,6 +23,7 @@ import pytest
 from gym_dr import (
     ContinuousActionSpaceConfig,
     ExperimentConfig,
+    OfftrackRate,
     Sb3Trainer,
     TrackingConfig,
     TrainingConfig,
@@ -173,6 +174,11 @@ def path_env_factory(experiment: ExperimentConfig) -> Any:
 def container_mode(tmp_path, monkeypatch):
     """Force gym_dr.train into in-container mode and redirect artifacts/MLflow."""
     monkeypatch.setenv("GYM_DR_IN_CONTAINER", "1")
+    # The in-container train() path hard-exits via os._exit(0) to dodge the
+    # rclpy/DDS finalize segfault (see gym_dr/app.py). Under the in-process test
+    # suite that would kill pytest before any post-train() assertion runs, so opt
+    # out — the segfault-dodge only matters in a real single-chunk container.
+    monkeypatch.setenv("GYM_DR_NO_HARD_EXIT", "1")
     monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     monkeypatch.delenv("MLFLOW_PARENT_RUN_ID", raising=False)
@@ -500,24 +506,20 @@ def test_eval_path_plots_logged_as_tb_images(container_mode, monkeypatch):
         assert tag in img_tags, f"missing image tag {tag}; got {sorted(img_tags)}"
 
 
-def test_mastery_met_threshold_logic():
-    """``_mastery_met`` gates purely on the eval off-track fraction vs the
-    configured tolerance, and is a no-op when disabled / no episodes ran."""
-    from gym_dr.trainers.sb3.callbacks import _mastery_met
+def test_offtrack_strategy_reproduces_mastery_logic():
+    """The OfftrackRate strategy + EarlyStopController reproduce the old
+    ``_mastery_met`` gate: stop when the eval off-track fraction is within
+    tolerance, and never stop when the strategy is ``None`` (disabled)."""
+    from gym_dr.early_stopping import EarlyStopController, OfftrackRate
 
-    class _T:
-        early_stop_enabled = True
-        early_stop_max_offtrack_rate = 0.0
-
-    t = _T()
-    assert _mastery_met(t, 0, 3) is True       # zero off-track -> mastered
-    assert _mastery_met(t, 1, 3) is False      # any off-track fails at rate 0
-    assert _mastery_met(t, 0, 0) is False       # no eval episodes -> not mastered
-    t.early_stop_max_offtrack_rate = 0.5
-    assert _mastery_met(t, 1, 2) is True        # 0.50 <= 0.50
-    assert _mastery_met(t, 2, 3) is False       # 0.66 > 0.50
-    t.early_stop_enabled = False
-    assert _mastery_met(t, 0, 3) is False        # disabled -> never
+    strict = OfftrackRate(max_offtrack_rate=0.0, patience=1)
+    assert strict.met({"offtrack_rate": 0.0}) is True       # zero off-track -> mastered
+    assert strict.met({"offtrack_rate": 1 / 3}) is False    # any off-track fails at rate 0
+    tol = OfftrackRate(max_offtrack_rate=0.5)
+    assert tol.met({"offtrack_rate": 0.5}) is True           # 0.50 <= 0.50
+    assert tol.met({"offtrack_rate": 2 / 3}) is False        # 0.66 > 0.50
+    # None strategy -> the controller is a no-op (disabled).
+    assert EarlyStopController(None).update({"offtrack_rate": 0.0}) is False
 
 
 def test_early_stop_ends_single_track_run_when_mastered(container_mode):
@@ -529,8 +531,7 @@ def test_early_stop_ends_single_track_run_when_mastered(container_mode):
     tmp_path = container_mode
     exp = _experiment("early_stop_single", tmp_path, total_timesteps=512, eval_freq=64).with_overrides(
         **{
-            "training.early_stop_enabled": True,
-            "training.early_stop_max_offtrack_rate": 0.0,
+            "training.early_stop": OfftrackRate(max_offtrack_rate=0.0, patience=1),
             "training.n_eval_episodes": 2,
         },
     )
@@ -552,8 +553,7 @@ def test_early_stop_does_not_fire_when_car_leaves_track(container_mode):
     exp = _experiment("no_early_stop", tmp_path, total_timesteps=128, eval_freq=64).with_overrides(
         env_factory=offtrack_env_factory,
         **{
-            "training.early_stop_enabled": True,
-            "training.early_stop_max_offtrack_rate": 0.0,
+            "training.early_stop": OfftrackRate(max_offtrack_rate=0.0, patience=1),
             "training.n_eval_episodes": 2,
         },
     )
@@ -587,8 +587,7 @@ def test_early_stop_advances_rotation_per_track(container_mode, monkeypatch):
     exp = _experiment("early_stop_rot", tmp_path, total_timesteps=256, eval_freq=64).with_overrides(
         worlds=WorldsConfig(names=["world_a", "world_b"], chunk_steps=256, rotations=1),
         **{
-            "training.early_stop_enabled": True,
-            "training.early_stop_max_offtrack_rate": 0.0,
+            "training.early_stop": OfftrackRate(max_offtrack_rate=0.0, patience=1),
         },
     )
     train(exp)
@@ -865,15 +864,23 @@ def test_track_catalog_lookup():
     assert set(ALL_TRACKS) == set(TRACKS.keys())
 
 
-def test_trainer_protocol_duck_typed():
-    """Any object with fit(env, ctx) satisfies the protocol — no inheritance."""
+def test_custom_trainer_extends_base():
+    """A custom algorithm extends the Trainer ABC and implements fit() — the
+    "bring your own algorithm" seam (no Stable-Baselines lock-in). The ABC
+    enforces the contract: a subclass that omits fit() cannot instantiate."""
     from gym_dr.trainers.base import Trainer, TrainResult
 
-    class MyTrainer:
+    class MyTrainer(Trainer):
         def fit(self, env, ctx):
             return TrainResult(final_eval_reward=42.0)
 
     assert isinstance(MyTrainer(), Trainer)
+
+    class Incomplete(Trainer):
+        pass
+
+    with pytest.raises(TypeError):
+        Incomplete()  # abstract fit() not implemented
 
 
 def test_reward_metrics_recorded_to_tensorboard(container_mode):

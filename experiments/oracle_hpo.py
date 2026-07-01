@@ -37,7 +37,7 @@ os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"        # 11-feature actor ve
 from gym_dr import (                                       # noqa: E402
     ACL, ADR, ContinuousActionSpaceConfig, EnvironmentConfig, ExperimentConfig,
     FeatureObs, Range, Sb3Trainer, TraceConfig, TrackingConfig, TrainingConfig,
-    TRACKS, centerline_quadratic, clean_completion, study,
+    TRACKS, centerline_quadratic, clean_completion, study, OfftrackRate,
 )
 from gym_dr.asymmetric import (                             # noqa: E402
     AsymmetricActorCriticPolicy, asymmetric_recurrent_policy)
@@ -112,7 +112,7 @@ base = ExperimentConfig(
         checkpoint_keep_last=1, eval_freq=CHUNK_STEPS, n_eval_episodes=5,
         rtf_override=60, eval_path_plots=True,   # render held-out trajectory overlays to TB IMAGES
         # mild early-stop so a clearly-solved trial frees the worker for the next
-        early_stop_enabled=True, early_stop_max_offtrack_rate=0.10, early_stop_patience=3),
+        early_stop=OfftrackRate(max_offtrack_rate=0.10, patience=3)),
     tracking=TrackingConfig(mlflow_experiment=NAME),
     trace=TraceConfig(enabled=False),
     seed=42, use_gpu=False,
