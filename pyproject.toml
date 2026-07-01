@@ -94,3 +94,10 @@ deepracer-utils = { git = "https://github.com/Luna-v0/deepracer-utils.git", bran
 
 [tool.setuptools]
 packages = ["gym_dr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: end-to-end/integration tests; deselect with -m 'not slow'",
+    "requires_sim: needs a running DeepRacer/Gazebo simulator; skipped where none is available",
+]
