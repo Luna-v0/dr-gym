@@ -1,0 +1,43 @@
+site_name: dr-gym — RL Study Orchestrator
+site_description: Reproducible, extensible RL studies on Gymnasium environments (DeepRacer)
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+    - toc.integrate
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Study & Pipeline interface: study-pipeline.md
+      - Configuration: configuration.md
+      - Algorithms: algorithms.md
+      - Hyperparameter optimization: hpo.md
+  - Architecture:
+      - System overview: system-overview.md
+      - Code map: code-map.md
+      - Trainer contract: trainer-contract.md
+      - Trace contract: trace-contract.md
+      - Artifact layout: artifact-layout.md
+  - Evaluate & observe:
+      - Evaluation protocol: eval-protocol.md
+      - Tracking (MLflow): tracking.md
+      - TensorBoard: tensorboard.md
+  - Deployment:
+      - ONNX support: onnx-support-status.md
+      - Physical car: physical-car-integration-notes.md
+  - Reference:
+      - Glossary: glossary.md
+      - Contributing: contributing.md
+  - Decisions (ADRs):
+      - "0004 · Orchestrator refactor interface": decisions/0004-orchestrator-refactor-interface.md

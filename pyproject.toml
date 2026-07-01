@@ -41,6 +41,10 @@ analysis = [
     "jupyterlab>=4.3.8",
     "nbformat>=5.10.4",
 ]
+# Docs site (mkdocs + Material). Build/serve: `uv run --group docs mkdocs serve`.
+docs = [
+  "mkdocs-material>=9.5",
+]
 dev = [
   "pytest>=8",
   "onnx>=1.15",
