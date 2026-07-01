@@ -79,8 +79,8 @@ def test_separate_towers_e2e(tmp_path, monkeypatch):
         TrainingConfig,
         WorldsConfig,
         center_line,
-        train,
     )
+    from gym_dr.app import train
     from gym_dr.networks import DeepRacerCNN
     from tests.test_smoke import stub_env_factory
 

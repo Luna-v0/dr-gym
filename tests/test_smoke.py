@@ -29,8 +29,8 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     center_line,
-    train,
 )
+from gym_dr.app import train  # internal orchestration entrypoint (Study delegates here)
 
 
 # --- stub env ---------------------------------------------------------------
@@ -605,7 +605,8 @@ def test_multiworld_study_enables_rotation(tmp_path, monkeypatch):
     on the worker env (so each trial rotates training worlds), while a
     single-world strategy leaves it unset (legacy one-world-per-trial)."""
     import gym_dr.docker_runner as docker_runner
-    from gym_dr import OrderedSplit, study
+    from gym_dr import OrderedSplit
+    from gym_dr.app import study
 
     monkeypatch.delenv("GYM_DR_WORKER", raising=False)
     monkeypatch.delenv("GYM_DR_IN_CONTAINER", raising=False)

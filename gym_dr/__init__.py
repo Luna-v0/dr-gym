@@ -17,7 +17,11 @@ from gym_dr.action_space import (
     DiscreteAction,
     DiscreteActionSpaceConfig,
 )
-from gym_dr.app import inspect, study, train
+# Clean break (ADR-0004): `Study` is the single user-facing entrypoint. The
+# legacy `train`/`study` functions live on as internal orchestration in
+# `gym_dr.app` (Study delegates to them) but are no longer part of the public
+# surface. `inspect` stays — it's a dry-run helper, not an entrypoint.
+from gym_dr.app import inspect
 from gym_dr.config import (
     ExperimentConfig,
     TraceConfig,
@@ -42,6 +46,7 @@ from gym_dr.environment import CameraObs, EnvironmentConfig, FeatureObs, SafeRL
 from gym_dr.pipeline import Stage, compose, stage
 from gym_dr.randomization import Choice, Range
 from gym_dr.search import Categorical, Fixed, Float, Int, SearchSpace
+from gym_dr.study import Study, StudyResult
 from gym_dr.object_avoidance import ObjectAvoidanceConfig
 from gym_dr.seeding import ReplicateSeeds, SeedManager
 from gym_dr.rewards import (
@@ -89,6 +94,8 @@ __all__ = [
     "Float",
     "Int",
     "Categorical",
+    "Study",
+    "StudyResult",
     "EnvironmentConfig",
     "CameraObs",
     "FeatureObs",
@@ -128,7 +135,5 @@ __all__ = [
     "progress_per_step",
     "progress_safe",
     "waypoint_anticipation",
-    "study",
     "time_trial",
-    "train",
 ]

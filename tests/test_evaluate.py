@@ -19,8 +19,8 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     center_line,
-    train,
 )
+from gym_dr.app import train
 from gym_dr.evaluate import run_evaluation
 from tests.test_smoke import stub_env_factory  # noqa: F401
 

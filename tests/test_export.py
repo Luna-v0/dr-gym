@@ -25,8 +25,8 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     center_line,
-    train,
 )
+from gym_dr.app import train
 from gym_dr.export import export_bundle, sb3_to_onnx
 from tests.test_smoke import StubDeepRacerEnv, stub_env_factory  # noqa: F401
 
