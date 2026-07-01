@@ -25,6 +25,7 @@ from gym_dr.worlds import FixedWorlds, WorldStrategy
 
 if TYPE_CHECKING:
     from gym_dr.early_stopping import EarlyStopStrategy
+    from gym_dr.environment import EnvironmentConfig
     from gym_dr.trainers.base import Trainer
 
 
@@ -363,14 +364,6 @@ class ExperimentConfig:
     ``Range``/``Choice`` knobs (``gym_dr.domain_randomization``). Default None.
     Prefer authoring via ``environment=EnvironmentConfig(domain_randomization=...)``."""
 
-    environment: "EnvironmentConfig | None" = None
-    """The new typed environment-building API (``gym_dr.environment.EnvironmentConfig``).
-    When set, its fields (observation→camera_obs, action_space, curriculum→world_strategy,
-    domain_randomization, object_avoidance, safe_rl→cost, n_cars, reward, eval_reward,
-    enable_gui) are unpacked into this config in ``__post_init__`` — so the env factory
-    and orchestrator read them as before. This is the preferred way to declare an
-    experiment; the flat fields remain the internal representation."""
-
     object_avoidance: ObjectAvoidanceConfig | None = None
     """Optional static-obstacle Object Avoidance settings. ``None`` (the
     default) keeps training pure time-trial. Set to an
@@ -442,59 +435,76 @@ class ExperimentConfig:
     even at a fixed seed — expect some run-to-run variance from the
     simulator regardless."""
 
-    def __post_init__(self) -> None:
-        """Unpack a composed ``environment`` into the flat fields the orchestrator
-        reads, so the new typed API and the legacy flat fields are one source of
-        truth. Frozen dataclass -> ``object.__setattr__``."""
-        env = self.environment
-        if env is None:
-            return
-        import dataclasses as _dc
+    @classmethod
+    def from_environment(
+        cls,
+        environment: "EnvironmentConfig",
+        *,
+        name: str,
+        env_factory: "Callable[[ExperimentConfig], Any] | None" = None,
+        trainer: "Trainer | None" = None,
+        training: "TrainingConfig | None" = None,
+        tracking: "TrackingConfig | None" = None,
+        trace: "TraceConfig | None" = None,
+        seed: "int | None" = None,
+        use_gpu: bool = False,
+    ) -> "ExperimentConfig":
+        """Build an ``ExperimentConfig`` from a typed :class:`EnvironmentConfig`.
+
+        **The single authoring path.** The environment's fields (observation →
+        ``camera_obs``, ``action_space``, curriculum → ``world_strategy``,
+        ``domain_randomization``, ``object_avoidance``, ``safe_rl`` → ``cost``,
+        ``n_cars``, ``reward``, ``eval_reward``, ``enable_gui``) are read into the
+        flat config **once, here** — not re-derived on every ``dataclasses.replace``.
+        That eliminates the old dual-source-of-truth: because nothing re-unpacks, a
+        ``with_overrides`` (e.g. the metrics-wrapped reward ``install_metrics``
+        injects) can never be silently undone. Pass the training / tracking / trainer
+        concerns as keyword arguments.
+        """
+        import os
+
         from gym_dr.environment import FeatureObs
-        s = object.__setattr__
-        # Fill a flat field from ``environment`` ONLY where the caller left it at
-        # its dataclass default. ``dataclasses.replace`` (used by ``with_overrides``)
-        # re-runs ``__post_init__`` on every copy, so unconditional unpacking would
-        # silently clobber an explicit override — most damagingly the metrics-wrapped
-        # ``reward`` that ``install_metrics`` injects via ``with_overrides``. Without
-        # this guard the env runs the RAW reward, ``record_step`` never fires, and all
-        # ``dr/*`` metrics, the trace, and eval-path capture come back empty.
-        _fields = {f.name: f for f in _dc.fields(self)}
 
-        def _default(name: str) -> Any:
-            f = _fields[name]
-            if f.default is not _dc.MISSING:
-                return f.default
-            if f.default_factory is not _dc.MISSING:  # type: ignore[misc]
-                return f.default_factory()
-            return _dc.MISSING
-
-        def _fill(name: str, value: Any) -> None:
-            if getattr(self, name) == _default(name):
-                s(self, name, value)
-
-        _fill("action_space", env.action_space)
-        _fill("world_strategy", env.curriculum)
-        _fill("domain_randomization", env.domain_randomization)
-        _fill("object_avoidance", env.object_avoidance)
-        _fill("n_cars", env.n_cars)
-        _fill("reward", env.reward)
-        _fill("eval_reward", env.eval_reward)
-        _fill("enable_gui", env.enable_gui)
-        _fill("camera_obs", env.camera_obs)
-        if env.safe_rl is not None:
-            _fill("cost", env.safe_rl.cost)
         # Feature-obs vector selection (dispatch reads GYM_DR_FEATURE_SET) +
-        # asymmetric-critic Dict obs (dispatch reads GYM_DR_ASYM_CRITIC). Set as env
-        # vars because the container RE-IMPORTS this experiment module — __post_init__
-        # runs again there, so the flags ride along without explicit forwarding.
-        if isinstance(env.observation, FeatureObs):
+        # asymmetric-critic Dict obs (GYM_DR_ASYM_CRITIC). Env vars because the
+        # container RE-IMPORTS the experiment module, re-running this builder at
+        # module load, so the flags ride along without explicit forwarding.
+        if isinstance(environment.observation, FeatureObs):
             from gym_dr.perception import ACTOR_FEATURES
-            import os
-            if tuple(env.observation.features) == tuple(ACTOR_FEATURES):
+
+            if tuple(environment.observation.features) == tuple(ACTOR_FEATURES):
                 os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"
-            if env.observation.asymmetric_critic:
+            if environment.observation.asymmetric_critic:
                 os.environ["GYM_DR_ASYM_CRITIC"] = "1"
+
+        kwargs: "dict[str, Any]" = dict(
+            name=name,
+            action_space=environment.action_space,
+            world_strategy=environment.curriculum,
+            domain_randomization=environment.domain_randomization,
+            object_avoidance=environment.object_avoidance,
+            n_cars=environment.n_cars,
+            reward=environment.reward,
+            eval_reward=environment.eval_reward,
+            enable_gui=environment.enable_gui,
+            camera_obs=environment.camera_obs,
+            use_gpu=use_gpu,
+        )
+        if environment.safe_rl is not None:
+            kwargs["cost"] = environment.safe_rl.cost
+        if env_factory is not None:
+            kwargs["env_factory"] = env_factory
+        if trainer is not None:
+            kwargs["trainer"] = trainer
+        if training is not None:
+            kwargs["training"] = training
+        if tracking is not None:
+            kwargs["tracking"] = tracking
+        if trace is not None:
+            kwargs["trace"] = trace
+        if seed is not None:
+            kwargs["seed"] = seed
+        return cls(**kwargs)
 
     def effective_strategy(self) -> WorldStrategy:
         """The world schedule actually used for this run.

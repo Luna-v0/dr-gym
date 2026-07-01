@@ -22,10 +22,8 @@ _cfg = dataclasses.replace(
     _cfg,
     training=dataclasses.replace(_cfg.training, total_timesteps=2000, eval_freq=10 ** 9,
                                  checkpoint_freq=10 ** 9),
-    environment=dataclasses.replace(
-        _cfg.environment,
-        curriculum=dataclasses.replace(_cfg.environment.curriculum, n_chunks=1,
-                                       chunk_steps=2000, eval_worlds=[])),
+    world_strategy=dataclasses.replace(_cfg.world_strategy, n_chunks=1,
+                                       chunk_steps=2000, eval_worlds=[]),
 )
 experiment = _cfg
 

@@ -26,7 +26,7 @@ def test_environment_unpacks_into_experiment():
                                  friction=Range(0.8, 1.5), random_start=True,
                                  random_direction=True),
         n_cars=2)
-    exp = ExperimentConfig(name="t", environment=env)
+    exp = ExperimentConfig.from_environment(env, name="t")
     assert exp.camera_obs is False            # FeatureObs -> camera_obs False
     assert exp.n_cars == 2
     assert type(exp.world_strategy).__name__ == "ACL"
@@ -40,7 +40,7 @@ def test_camera_obs_default_and_safe_rl_flag():
     assert env.camera_obs is True and env.is_safe_rl is False
     env2 = EnvironmentConfig(safe_rl=SafeRL(cost=lambda p: 0.0, cost_limit=5.0))
     assert env2.is_safe_rl is True
-    assert ExperimentConfig(name="t2", environment=env2).cost is not None
+    assert ExperimentConfig.from_environment(env2, name="t2").cost is not None
 
 
 def test_adr_is_adr_flag():
@@ -49,19 +49,17 @@ def test_adr_is_adr_flag():
     assert DomainRandomization().is_adr is False
 
 
-def test_with_overrides_survives_environment_unpack():
-    """Regression: ``with_overrides`` (dataclasses.replace) re-runs __post_init__,
-    which must NOT clobber an explicit flat override with the environment's value.
-
-    This is exactly how ``install_metrics`` injects the metrics-wrapped reward; if
-    __post_init__ overwrites it with ``environment.reward`` the env runs the RAW
-    reward, ``record_step`` never fires, and all ``dr/*`` metrics / trace / eval-path
-    plots come back empty (the bug that made eval trajectories render nothing)."""
+def test_with_overrides_preserves_reward_override():
+    """``from_environment`` reads the reward ONCE and nothing re-unpacks, so a later
+    ``with_overrides`` (exactly how ``install_metrics`` injects the metrics-wrapped
+    reward) can never be silently undone — the reward-clobber bug is gone by
+    construction (previously ``__post_init__`` re-ran on every ``replace`` and could
+    overwrite the wrapped reward, emptying all ``dr/*`` metrics / trace / eval)."""
     from gym_dr.rewards import centerline_quadratic
 
     env = EnvironmentConfig(observation=FeatureObs(), reward=centerline_quadratic, n_cars=1)
-    exp = ExperimentConfig(name="t", environment=env)
-    assert exp.reward is centerline_quadratic            # unpacked from environment
+    exp = ExperimentConfig.from_environment(env, name="t")
+    assert exp.reward is centerline_quadratic            # taken from the environment
 
     sentinel = lambda p: 42.0                             # noqa: E731 — stand-in wrapped reward
     exp2 = exp.with_overrides(reward=sentinel)
@@ -78,7 +76,7 @@ def test_install_metrics_wrapped_reward_records_steps():
     from gym_dr.rewards import centerline_quadratic
 
     env = EnvironmentConfig(observation=FeatureObs(), reward=centerline_quadratic)
-    exp = ExperimentConfig(name="t", environment=env)
+    exp = ExperimentConfig.from_environment(env, name="t")
     wrapped_exp, _wrap, state = install_metrics(exp, run_dir=None)
     assert hasattr(wrapped_exp.reward, "__wrapped__")    # metrics tap present
     state.capture_path = True

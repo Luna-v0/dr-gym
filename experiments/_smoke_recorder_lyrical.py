@@ -21,9 +21,8 @@ OUT = os.environ.setdefault("GYM_DR_PERCEPTION_OUT", "/out")
 
 
 def main() -> int:
-    exp = ExperimentConfig(
+    exp = ExperimentConfig.from_environment(EnvironmentConfig(observation=CameraObs(), n_cars=2),
         name="rec-smoke",
-        environment=EnvironmentConfig(observation=CameraObs(), n_cars=2),
     )
     env = build_env(exp)
     n = env.num_envs

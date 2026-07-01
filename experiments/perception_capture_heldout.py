@@ -63,11 +63,9 @@ def build_capture(group: tuple[str, ...], resume: str | None):
     training = dataclasses.replace(
         exp.training, total_timesteps=CAPTURE_STEPS, resume_from=resume,
         eval_freq=10 ** 12)
-    env = dataclasses.replace(
-        exp.environment,
-        curriculum=dataclasses.replace(exp.environment.curriculum, eval_worlds=[]))
+    world_strategy = dataclasses.replace(exp.world_strategy, eval_worlds=[])
     return dataclasses.replace(
-        exp, name=NAME, environment=env, trainer=trainer, training=training)
+        exp, name=NAME, world_strategy=world_strategy, trainer=trainer, training=training)
 
 
 def main() -> int:

@@ -18,9 +18,7 @@ from gym_dr import (
 
 
 def main() -> int:
-    exp = ExperimentConfig(
-        name="smoke-train-lyrical",
-        environment=EnvironmentConfig(
+    exp = ExperimentConfig.from_environment(EnvironmentConfig(
             # asymmetric_critic=True -> Dict{actor,critic} obs, matching the real
             # feature experiments (oracle_hpo) so the trainer's MultiInputPolicy
             # fits (a plain Box would need MlpPolicy).
@@ -28,6 +26,7 @@ def main() -> int:
             action_space=ContinuousActionSpaceConfig(normalize_actions=True),
             n_cars=1,
         ),
+        name="smoke-train-lyrical",
         # Tiny PPO: one short rollout + update. The sim runs ~real-time (no RTF
         # accel wired yet), so keep n_steps small or the rollout outlasts the
         # smoke timeout. eval/checkpoint effectively disabled.

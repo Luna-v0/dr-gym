@@ -171,9 +171,8 @@ def build_experiment(group: tuple[str, ...], resume: str | None) -> ExperimentCo
         # slow-driving exploit under centerline_quadratic). eval stays clean_completion.
         n_cars=len(group), reward=progress_per_step, eval_reward=clean_completion,
     )
-    return ExperimentConfig(
+    return ExperimentConfig.from_environment(env,
         name=NAME,
-        environment=env,
         env_factory=build_env,
         trainer=Sb3Trainer(
             name="ppo", policy="MultiInputPolicy",

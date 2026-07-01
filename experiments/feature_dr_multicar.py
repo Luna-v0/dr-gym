@@ -58,9 +58,8 @@ ENV = EnvironmentConfig(
     enable_gui=os.getenv("GYM_DR_DEMO_GUI", "0") != "0",
 )
 
-experiment = ExperimentConfig(
+experiment = ExperimentConfig.from_environment(ENV,
     name=f"feature_dr_multicar_{N_CARS}",
-    environment=ENV,
     env_factory=build_env,          # (n>1, feature) -> multi_car (feature)
     trainer=Sb3Trainer(
         name="ppo", policy="MlpPolicy",

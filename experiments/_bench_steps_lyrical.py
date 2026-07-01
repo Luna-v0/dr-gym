@@ -20,9 +20,8 @@ from gym_dr.envs.dispatch import build_env
 def main() -> int:
     n_cars = int(os.getenv("N_CARS", "1"))
     n_steps = int(os.getenv("BENCH_STEPS", "300"))
-    exp = ExperimentConfig(
+    exp = ExperimentConfig.from_environment(EnvironmentConfig(observation=FeatureObs(), n_cars=n_cars),
         name="bench",
-        environment=EnvironmentConfig(observation=FeatureObs(), n_cars=n_cars),
     )
     env = build_env(exp)
     env.reset()

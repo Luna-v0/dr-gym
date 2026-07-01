@@ -22,9 +22,8 @@ os.environ.setdefault("GYM_DR_ALLOW_CAMERA_NCARS", "1")
 def main() -> int:
     n_cars = int(os.getenv("N_CARS", "2"))
     n_steps = int(os.getenv("BENCH_STEPS", "150"))
-    exp = ExperimentConfig(
+    exp = ExperimentConfig.from_environment(EnvironmentConfig(observation=CameraObs(), n_cars=n_cars),
         name="cam-ncars-bench",
-        environment=EnvironmentConfig(observation=CameraObs(), n_cars=n_cars),
     )
     env = build_env(exp)
     n = env.num_envs

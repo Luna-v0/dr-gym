@@ -27,11 +27,10 @@ DEVICE = os.getenv("GYM_DR_DEVICE", "cpu")
 
 
 def main() -> int:
-    exp = ExperimentConfig(
-        name="bench-cam-train",
-        environment=EnvironmentConfig(
+    exp = ExperimentConfig.from_environment(EnvironmentConfig(
             observation=CameraObs(), n_cars=2,
             action_space=ContinuousActionSpaceConfig(normalize_actions=True)),
+        name="bench-cam-train",
         trainer=Sb3Trainer(
             name="ppo", policy="MultiInputPolicy", device=DEVICE,
             kwargs={

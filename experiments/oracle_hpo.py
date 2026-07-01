@@ -96,9 +96,8 @@ ENV = EnvironmentConfig(
     n_cars=1, reward=centerline_quadratic, eval_reward=clean_completion,
 )
 
-base = ExperimentConfig(
+base = ExperimentConfig.from_environment(ENV,
     name=NAME,
-    environment=ENV,
     env_factory=build_env,
     trainer=Sb3Trainer(
         name="ppo", policy=AsymmetricActorCriticPolicy,   # default = the MLP arm
@@ -145,7 +144,7 @@ def search_space(trial) -> dict:
     net = {"pi": [width, width], "vf": [width, width]}
     ov: dict = {
         "trainer.frame_stack": 1,                                   # NO stacking, either arch
-        "environment.domain_randomization.feature_noise": Range(
+        "domain_randomization.feature_noise": Range(
             0.0, trial.suggest_float("feature_noise_high", 0.1, 0.4)),
     }
     if arch == "mlp":

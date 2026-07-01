@@ -84,9 +84,8 @@ ENV = EnvironmentConfig(
     n_cars=1, reward=centerline_quadratic, eval_reward=clean_completion,
 )
 
-experiment = ExperimentConfig(
+experiment = ExperimentConfig.from_environment(ENV,
     name=NAME,
-    environment=ENV,
     env_factory=build_env,
     trainer=Sb3Trainer(
         name="ppo", policy="MlpPolicy",
