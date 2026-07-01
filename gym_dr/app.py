@@ -232,7 +232,9 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     # Forward the camera-CNN run's knobs into the container: the perception dataset
     # recorder output dir (a container path under the mounted /workspace/artifacts)
     # and the sim-side visual DR gate/seed (read by deepracer_env's VisualRandomizer).
-    for _k in ("GYM_DR_PERCEPTION_OUT", "GYM_DR_VISUAL_DR", "GYM_DR_VISUAL_DR_SEED"):
+    for _k in ("GYM_DR_PERCEPTION_OUT", "GYM_DR_VISUAL_DR", "GYM_DR_VISUAL_DR_SEED",
+               "GYM_DR_DR_WARMUP_STEPS", "GYM_DR_FEATURE_SET", "GYM_DR_ASYM_CRITIC",
+               "GYM_DR_ALLOW_CAMERA_NCARS"):
         if os.getenv(_k):
             base_env[_k] = os.environ[_k]
     if experiment.training.rtf_override is not None:
@@ -251,6 +253,12 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
         base_env["GYM_DR_N_CARS"] = str(n_cars)
     if not getattr(experiment, "camera_obs", True):
         base_env["GYM_DR_CAMERAS"] = ""   # no car renders a camera (feature obs)
+    else:
+        # Camera obs: the sim must RENDER (gz --headless-rendering, EGL/GPU) for the
+        # cameras to produce frames. Set in the container env so the LAUNCH sees it
+        # at startup (it runs before the experiment re-imports). Feature obs leaves
+        # it unset -> no wasted rendering.
+        base_env["GYM_DR_RENDER"] = "1"
     # Friction DR (per-spawn): sample a μ-factor from the DR `friction` spec and set
     # the wheel μ via GYM_DR_FRICTION_MU (the sim launch arg). Gazebo Classic has no
     # runtime μ service, so friction varies per run/worker, not per episode. Baseline
