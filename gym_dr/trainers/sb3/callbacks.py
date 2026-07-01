@@ -11,6 +11,7 @@ from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
 )
+from stable_baselines3.common.logger import KVWriter
 
 
 import os as _os
@@ -663,25 +664,37 @@ class WallClockLimitCallback(BaseCallback):
         return False
 
 
-class MlflowMirrorCallback(BaseCallback):
-    """Mirror SB3 logger scalars to the active MLflow run on each rollout end."""
+class MlflowKVWriter(KVWriter):
+    """SB3 logger output that mirrors EVERY dumped scalar to the active MLflow run.
 
-    def _on_step(self) -> bool:
-        return True
+    Registered in the model's logger (via ``model.set_logger``), so it fires at
+    every ``logger.dump()`` with the COMPLETE ``name_to_value`` snapshot —
+    ``rollout/*``, ``train/*``, ``dr/*`` and ``eval/*`` all reach MLflow. The
+    previous rollout-end mirror read ``name_to_value`` inside ``collect_rollouts``,
+    *before* ``rollout/ep_rew_mean`` / ``time/fps`` / all ``train/*`` (policy loss,
+    entropy, clip fraction, explained variance) had been recorded — so those core
+    signals never reached the MLflow UI. A ``KVWriter`` fires after ``dump()`` with
+    everything present, and is version-stable across SB3 v1/v2.
+    """
 
-    def _on_rollout_end(self) -> None:
+    def write(self, key_values, key_excluded, step: int = 0) -> None:
         try:
             import mlflow
         except ImportError:
             return
         if mlflow.active_run() is None:
             return
-        step = int(self.num_timesteps)
-        for key, value in self.logger.name_to_value.items():
+        for key, value in key_values.items():
+            # Scalar metrics only — skip images/figures/text/HParam and bools.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
             try:
-                mlflow.log_metric(key, float(value), step=step)
+                mlflow.log_metric(key, float(value), step=int(step))
             except (TypeError, ValueError):
                 continue
+
+    def close(self) -> None:  # pragma: no cover - nothing to release
+        pass
 
 
 class RewardMetricsCallback(BaseCallback):
@@ -691,8 +704,8 @@ class RewardMetricsCallback(BaseCallback):
     carries a ``dr_episode`` summary (see ``gym_dr/metrics.py``). This
     callback inspects ``self.locals["infos"]`` on each step, picks up any
     finalized summaries, and pushes their keys/values into the logger via
-    ``record_mean`` — they then surface in TensorBoard scalars and (via
-    ``MlflowMirrorCallback``) MLflow metrics, averaged per rollout.
+    ``record_mean`` — they then surface in TensorBoard scalars and (via the
+    ``MlflowKVWriter`` in the model's logger) MLflow metrics, averaged per rollout.
     """
 
     def _on_step(self) -> bool:

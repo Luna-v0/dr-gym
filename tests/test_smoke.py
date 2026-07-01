@@ -300,6 +300,28 @@ def test_runtime_world_rotation_swaps_in_process(container_mode, monkeypatch):
     assert (run_dir / "latest_model.zip").exists()
 
 
+def test_rotation_writes_single_tensorboard_run(container_mode, monkeypatch):
+    """Regression (TB fragmentation): a multi-chunk rotation must write ONE
+    TensorBoard run, not one per chunk. Pre-fix each chunk's model.learn()
+    re-ran configure() and opened a new run_name_N SummaryWriter, so TB showed N
+    overlapping partial 'runs' and no complete curve — which read as 'runs not
+    showing on TensorBoard'. The pre-created logger (model.set_logger before the
+    rotation loop) keeps a single SummaryWriter across all chunks."""
+    tmp_path = container_mode
+    monkeypatch.setenv("GYM_DR_ROTATE", "1")
+    exp = _experiment("tb_rotation", tmp_path, total_timesteps=64).with_overrides(
+        worlds=WorldsConfig(names=["world_a", "world_b"], chunk_steps=64, rotations=2),
+    )
+    train(exp)  # plan = [a, b, a, b] -> 4 chunks, one logger
+
+    tb_root = tmp_path / "artifacts" / "tb_rotation" / "tensorboard"
+    assert tb_root.exists()
+    subdirs = [d for d in tb_root.iterdir() if d.is_dir()]
+    assert len(subdirs) == 1, f"expected 1 TB run dir, got {[d.name for d in subdirs]}"
+    event_files = list(tb_root.rglob("events.out.tfevents.*"))
+    assert len(event_files) == 1, f"expected 1 TB event file, got {event_files}"
+
+
 def test_rotation_crash_writes_resume_and_restart_code(container_mode, monkeypatch):
     """If gzserver dies mid-swap (set_world raises WorldSwapError), the trainer
     persists rotation_resume.json (chunk index + checkpoint) and the container

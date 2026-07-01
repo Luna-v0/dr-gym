@@ -16,7 +16,7 @@ from gym_dr.trainers.sb3.callbacks import (
     CtxCheckpointCallback,
     CtxEvalCallback,
     HeartbeatCallback,
-    MlflowMirrorCallback,
+    MlflowKVWriter,
     MultiWorldEvalCallback,
     RewardMetricsCallback,
     StatusJsonCallback,
@@ -234,7 +234,6 @@ class Sb3Trainer(Trainer):
                 update_interval_seconds=ctx.training.status_update_seconds,
                 max_train_seconds=ctx.training.max_train_seconds,
             ),
-            MlflowMirrorCallback(),
             RewardMetricsCallback(),
             # Touch $GYM_DR_HEARTBEAT so the host watchdog can distinguish a
             # wedged-but-alive sim (hang) from real progress (d3-hang-postmortem).
@@ -285,9 +284,24 @@ class Sb3Trainer(Trainer):
             )
         callbacks.append(eval_callback)
 
-        # Unified naming: SB3's default TB subdir is "<AlgoClass>_<auto_idx>"
-        # (e.g. PPO_1). Naming it after the run makes the TB sidebar legible
-        # and matches the MLflow run name + the Optuna trial.user_attr.
+        # Pre-create the SB3 logger ONCE, before any model.learn(). The rotation
+        # path calls model.learn() per chunk; each call would otherwise re-run
+        # SB3's configure(tensorboard_log, tb_log_name) and open a NEW
+        # SummaryWriter at run_name_1, run_name_2, ... — TB then shows N
+        # overlapping partial "runs" and no complete curve. Setting an explicit
+        # logger flips _custom_logger=True so _setup_learn skips re-configuring:
+        # every chunk shares ONE TensorBoard writer with a continuous step axis.
+        # The MlflowKVWriter output mirrors EVERY dumped scalar (rollout/*,
+        # train/*, dr/*, eval/*) to the active MLflow run at each dump() — the
+        # old rollout-end mirror missed the train/* + rollout/* signals.
+        from stable_baselines3.common.logger import configure as _configure
+
+        run_logger = _configure(
+            str(tensorboard_dir / run_dir.name), ["stdout", "tensorboard"]
+        )
+        run_logger.output_formats.append(MlflowKVWriter())
+        model.set_logger(run_logger)
+
         try:
             cb = CallbackList(callbacks)
             if ctx.world_plan:
