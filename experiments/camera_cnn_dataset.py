@@ -46,14 +46,17 @@ from gym_dr.networks import DeepRacerCNN                         # noqa: E402
 
 NAME = "camera_cnn_dataset"
 SMOKE = os.getenv("GYM_DR_CAM_SMOKE") == "1"
-CHUNK_STEPS = 2_000 if SMOKE else 60_000
+# GYM_DR_CAM_CHUNK_STEPS overrides the per-chunk step budget — lets a smoke run
+# force a *tiny* chunk so the container reaches teardown fast (e.g. exercising the
+# multi-car camera exit path) without waiting on a full 2k/60k rollout.
+CHUNK_STEPS = int(os.getenv("GYM_DR_CAM_CHUNK_STEPS", "2000" if SMOKE else "60000"))
 PASSES = 1 if SMOKE else 2                          # times to cycle all train tracks
 # Cars per chunk = DISTINCT tracks aggregated per rollout. More cars = stronger DR for
 # generalization (maintainer: prefer instances over raw throughput). Camera renders
 # serialize on one OGRE thread so RTF drops with N (benchmarked: n4=0.99x, ~0.5x at n8)
 # — acceptable here. Bounded by the launch's racecar_0..7 (=8) and the ~12-13 Gazebo
 # separate-track-instance spawn cap. Override with GYM_DR_CAM_NCARS.
-N_CARS = 2 if SMOKE else int(os.getenv("GYM_DR_CAM_NCARS", "8"))
+N_CARS = int(os.getenv("GYM_DR_CAM_NCARS", "2" if SMOKE else "8"))
 # Set at MODULE level (not in main()) so the spawned container — which re-imports this
 # file and runs ONLY the GYM_DR_IN_CONTAINER branch, never main() — also clears the
 # dr-gym camera n>2 guard. (>2 needs the generalised racecar_2..N launch, mounted via

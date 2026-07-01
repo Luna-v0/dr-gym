@@ -245,9 +245,15 @@ def _train_host(experiment: ExperimentConfig) -> str | None:
     # Forward the camera-CNN run's knobs into the container: the perception dataset
     # recorder output dir (a container path under the mounted /workspace/artifacts)
     # and the sim-side visual DR gate/seed (read by deepracer_env's VisualRandomizer).
+    # Also forward experiment-recognised knobs: the spawned container RE-IMPORTS the
+    # experiment module and rebuilds its config from module-level constants that read
+    # these vars, so without forwarding them a "smoke" run's host plan is smoke-sized
+    # but the CONTAINER trains a full chunk (SMOKE/CHUNK_STEPS defaulting off). The
+    # gz-DR throttle (GYM_DR_GZ_DR_INTERVAL_S) is read sim-side inside the container.
     for _k in ("GYM_DR_PERCEPTION_OUT", "GYM_DR_VISUAL_DR", "GYM_DR_VISUAL_DR_SEED",
                "GYM_DR_DR_WARMUP_STEPS", "GYM_DR_FEATURE_SET", "GYM_DR_ASYM_CRITIC",
-               "GYM_DR_ALLOW_CAMERA_NCARS"):
+               "GYM_DR_ALLOW_CAMERA_NCARS", "GYM_DR_CAM_SMOKE", "GYM_DR_CAM_NCARS",
+               "GYM_DR_CAM_CHUNK_STEPS", "GYM_DR_GZ_DR_INTERVAL_S"):
         if os.getenv(_k):
             base_env[_k] = os.environ[_k]
     if experiment.training.rtf_override is not None:
