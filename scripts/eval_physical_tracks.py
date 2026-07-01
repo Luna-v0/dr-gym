@@ -89,6 +89,15 @@ def _host_mode(args: argparse.Namespace) -> int:
         "GYM_DR_EVAL_TRACKS": ",".join(tracks),
         "RTF_OVERRIDE": str(args.rtf),
     }
+    # Feature/asym models pick their obs shape from env vars the run_config.json
+    # doesn't capture: GYM_DR_FEATURE_SET (9- vs 11-feature actor vector) and
+    # GYM_DR_ASYM_CRITIC (=1 -> Dict{actor,critic} obs for the asymmetric value
+    # net). Reconstruction defaults to the 9-feature Box, which mismatches an
+    # 11-input / Dict-obs policy — so forward them from the host when set (no-op
+    # for camera / default-feature models). dispatch.feature_time_trial reads both.
+    for _var in ("GYM_DR_FEATURE_SET", "GYM_DR_ASYM_CRITIC"):
+        if os.environ.get(_var):
+            env[_var] = os.environ[_var]
     print(f"[eval-physical] model={model_path.name} tracks={tracks} rtf={args.rtf}", flush=True)
     return spawn_training_chunk(
         image_tag=image,

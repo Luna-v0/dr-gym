@@ -111,7 +111,25 @@ def _draw_skeleton(ax: Any, ep: Dict[str, Any], world: Optional[str] = None) -> 
         else:
             ax.plot(xs, ys, color="0.6", lw=1.0, ls="--", zorder=1)
 
-    ax.set_aspect("equal", adjustable="datalim")
+    # Frame the axes to the FULL track extent (borders or centerline), NOT the
+    # driven path — else a car that barely moves (a tiny/zero-length trajectory)
+    # autoscales the view into a dot and the skeleton drops out of frame, making the
+    # panel look empty/"broken". With explicit limits the whole track always shows and
+    # the short path reads as a dot at the start.
+    geom = None
+    if borders is not None:
+        geom = np.vstack([np.asarray(borders[0], float), np.asarray(borders[1], float)])
+    elif wp_x:
+        geom = np.column_stack([np.asarray(wp_x, float), np.asarray(wp_y, float)])
+    if geom is not None and len(geom):
+        xmin, ymin = geom.min(axis=0)
+        xmax, ymax = geom.max(axis=0)
+        mx = (xmax - xmin) * 0.05 or 1.0
+        my = (ymax - ymin) * 0.05 or 1.0
+        ax.set_xlim(xmin - mx, xmax + mx)
+        ax.set_ylim(ymin - my, ymax + my)
+
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():

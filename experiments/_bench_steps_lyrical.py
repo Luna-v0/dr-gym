@@ -54,9 +54,16 @@ def main() -> int:
     wall = time.monotonic() - t0
 
     agent_sps = env_steps * n_cars / wall  # aggregate (per-agent) steps/s
-    print(f"[bench] n_cars={n_cars} RTF={os.getenv('RTF_OVERRIDE','(launch default)')} "
-          f"env_steps={env_steps} resets={resets} wall={wall:.2f}s "
-          f"| env_steps/s={env_steps/wall:.1f} | AGENT_steps/s={agent_sps:.1f}", flush=True)
+    line = (f"[bench] n_cars={n_cars} RTF={os.getenv('RTF_OVERRIDE','(launch default)')} "
+            f"env_steps={env_steps} resets={resets} wall={wall:.2f}s "
+            f"| env_steps/s={env_steps/wall:.1f} | AGENT_steps/s={agent_sps:.1f}")
+    print(line, flush=True)
+    # Persist to a mounted file too, so the host harness never races container log
+    # removal. BENCH_OUT is an absolute path inside the container (a bind mount).
+    out_path = os.getenv("BENCH_OUT")
+    if out_path:
+        with open(out_path, "a") as fh:
+            fh.write(line + "\n")
     env.close()
     print("[bench] BENCH DONE", flush=True)
     return 0

@@ -17,7 +17,9 @@ UPSTREAM_DIR_DEFAULT="${PROJECT_DIR}/.deepracer-env-upstream"
 
 # Upstream branch to track. Fresh clones use its latest tip; re-runs offer to
 # pull when it has advanced. Override with -b or UPSTREAM_BRANCH.
-UPSTREAM_BRANCH_DEFAULT="main"
+# Tracks the ROS 2 Lyrical / Gazebo Jetty port branch; flip back to "main" once
+# the port is merged upstream.
+UPSTREAM_BRANCH_DEFAULT="feat/ros2-lyrical-gazebo-jetty-port"
 
 MIN_FREE_GB_WARN=30
 MIN_FREE_GB_FAIL=20

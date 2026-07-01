@@ -63,6 +63,10 @@ def _launch(n, cam, rtf, device, sw):
         "RTF_OVERRIDE": str(rtf), "SEED": "42", "GYM_DR_N_CARS": str(n),
         "ENABLE_GUI": "False", "WORLD_NAME": "Spain_track", "ROTATE_START_INDEX": "0",
         "CHUNK_NAME": "mcbench", "MLFLOW_RUN_GROUP": "mcbench",
+        # Allow camera n>2 for the >2-camera-car render benchmark (the dr-gym guard
+        # is for the un-generalised launch; with racecar_2..N launch blocks the cars
+        # have real cameras). Forwarded from the host; default off keeps old runs safe.
+        "GYM_DR_ALLOW_CAMERA_NCARS": os.getenv("GYM_DR_ALLOW_CAMERA_NCARS", "0"),
     }
     if sw:
         env["LIBGL_ALWAYS_SOFTWARE"] = "1"; env["GALLIUM_DRIVER"] = "llvmpipe"

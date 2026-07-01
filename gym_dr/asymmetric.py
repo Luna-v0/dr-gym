@@ -66,3 +66,39 @@ class AsymmetricActorCriticPolicy(ActorCriticPolicy):
         # Re-create the optimizer so the swapped extractor's params are registered.
         self.optimizer = self.optimizer_class(
             self.parameters(), lr=lr_schedule(1), **(self.optimizer_kwargs or {}))
+
+
+def asymmetric_recurrent_policy():
+    """Build (lazily) the LSTM analogue of :class:`AsymmetricActorCriticPolicy` for
+    sb3-contrib ``RecurrentPPO``: a per-key extractor + a recurrent actor LSTM reading
+    the NOISED ``obs["actor"]`` and a separate critic LSTM reading the TRUE ``obs["critic"]``.
+
+    Returned as a factory so ``import gym_dr.asymmetric`` doesn't require sb3-contrib
+    (only the LSTM arm of the architecture study needs it). Pair with
+    ``Sb3Trainer(name="recurrent_ppo", policy=asymmetric_recurrent_policy())`` and a
+    feature env whose obs is ``Dict{actor:noised, critic:true}`` (frame_stack=1 — the
+    LSTM IS the memory, no observation stacking).
+    """
+    from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy
+
+    class AsymmetricRecurrentActorCriticPolicy(RecurrentActorCriticPolicy):
+        def __init__(self, observation_space, action_space, lr_schedule, *args, **kwargs):
+            if not (isinstance(observation_space, gym.spaces.Dict)
+                    and {"actor", "critic"} <= set(observation_space.spaces)):
+                raise ValueError(
+                    "AsymmetricRecurrentActorCriticPolicy needs a Dict obs with 'actor' + "
+                    f"'critic' keys; got {observation_space}")
+            kwargs["features_extractor_class"] = KeyExtractor
+            kwargs["features_extractor_kwargs"] = {"key": "actor"}
+            kwargs["share_features_extractor"] = False
+            kwargs.setdefault("enable_critic_lstm", True)   # critic gets its OWN lstm on the clean obs
+            super().__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
+
+        def _build(self, lr_schedule) -> None:
+            super()._build(lr_schedule)
+            # Point the value tower's extractor at the TRUE feature vector. The LSTM
+            # modules are created AFTER _build (in RecurrentActorCriticPolicy.__init__),
+            # which re-creates the optimizer there — so this extractor swap is picked up.
+            self.vf_features_extractor = KeyExtractor(self.observation_space, key="critic")
+
+    return AsymmetricRecurrentActorCriticPolicy

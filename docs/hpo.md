@@ -65,3 +65,11 @@ optuna-dashboard sqlite:///$PWD/optuna.db
 - **Network arch / policy class are out of the v1 search space.** Algorithm choice is fixed per study (it's a field on the base config, not a sampled param).
 - **Trial artifacts** land under `artifacts/<name>_trial_<n>/` with the full standard layout — every checkpoint still gets its metadata sibling.
 - If two workers grab `n_trials=N` each and only ~M trials are still pending in the study, Optuna's coordination via SQLite handles the duplicate work cleanly (the second worker just sees the study is full and stops).
+
+## Oracle HPO (`experiments/oracle_hpo.py`) — 2026-06-28
+
+Tunes the asymmetric-critic feature oracle: `learning_rate, ent_coef, n_steps, batch_size, gamma, gae_lambda, clip_range, n_epochs, target_kl`, the **observation-memory depth** `frame_stack ∈ {1,2,4,8}`, network width `∈ {64,128,256}`, and the `feature_noise` DR ceiling. Every key is config-driven (`trainer.*`, `environment.domain_randomization.*`), so the winning trial transplants directly into the multi-car production run `experiments/oracle_asym_multicar.py`.
+
+- **Single-car base on purpose.** The multi-car oracle can't `set_world`, so it has no in-loop held-out objective for Optuna. The single-car asym oracle rotates the held-out worlds each chunk via the ACL curriculum, so each trial returns a real **held-out clean-completion** score (the maximised objective). The searched knobs transfer to the multi-car run unchanged.
+- **`frame_stack` is in the search** because it's the lever that lets the policy infer an unobservable per-episode actuator bias; a mild ±5° bias is kept in the base so the search can see that benefit (the production run uses ±15°).
+- **Short trials** (`GYM_DR_HPO_CHUNK`×`GYM_DR_HPO_NCHUNKS`, default 240k steps) rank configs by early held-out learning; MedianPruner kills laggards after the 50%-budget warmup. Env knobs: `GYM_DR_HPO_TRIALS` (40), `GYM_DR_HPO_PARALLEL` (2). Single-car trials are multi-hour — run on a many-core box with `n_parallel>1`.

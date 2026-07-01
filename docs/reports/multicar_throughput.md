@@ -35,14 +35,27 @@ still enough samples/car for PPO). CPU inference (small MLP); GPU not needed.
 
 - **GPU inference is the big lever** (51 vs 17 = 3x) — the CNN dominates.
 - **GPU render** adds ~30% over software (51 vs 39) at n=2.
-- **Camera mode hard-caps at n=2 — a Gazebo Classic rendering limit (root-caused).**
-  At n=3 all three camera topics advertise, but only TWO publish frames:
-  racecar_0=15.7Hz, racecar_1=15.4Hz, **racecar_2=0Hz** (never publishes). Gazebo
-  Classic renders only 2 camera sensors per world; the 3rd starves, the blocking
-  sensor read times out and `log_and_exit()`s the whole run ~120s in. NOT fixable by
-  rtf (n=3 @ rtf=3 still failed) or timeout. `multi_car` now raises a clear error at
-  camera n>2 (override GYM_DR_ALLOW_CAMERA_NCARS=1). For >2 camera cars: separate
-  processes, or feature obs (scales to n=8). Deeper fix = Gz Sim/ROS2 (big port).
+- **Camera mode caps at n=2 — but this is a LAUNCH/CONFIG limit, NOT a rendering
+  limit. CORRECTION (2026-06-28):** the original "render limit" claim below was a
+  misdiagnosis (see [status-2026-06-28](status-2026-06-28.md)). The launch only spawns
+  **2 car bodies** (`racetrack_with_racecar.launch` has hardcoded `racecar_0/1`
+  `<include>`s + `car_node.py args="2"`); nothing spawns a 3rd body. So at n=3
+  racecar_2's camera topic advertises (rospy subscriber registers the name) but has
+  **no publisher** → 0 Hz → the blocking `DoubleBuffer.get(timeout=120.0)` starves and
+  `log_and_exit()`s ~120s in. The measurement below was "3 agents, 2 cars" — it never
+  placed a 3rd camera in the world, so it tested the launch limit, not the renderer.
+  rtf=3 "still failing" is consistent (no publisher regardless of RTF).
+  - To raise it: generate `racecar_2..N` `<include>` blocks + parameterize `car_node`.
+    The *real* residual limit then appears — Gazebo Classic serialises camera rendering
+    on one OGRE thread (n=2 already saturates render at ~51 steps/s / RTF~1.0), so 3+
+    real cameras **degrade fps/RTF gracefully**, not the current hard failure.
+  - `multi_car` still raises a clear error at camera n>2 (override
+    GYM_DR_ALLOW_CAMERA_NCARS=1) because the launch isn't generalized yet. Scale-out
+    without touching the launch: separate Gazebo processes (1–2 camera cars each), or
+    feature obs (n=8 — phantom agents tick because missing-model *state* reads don't
+    block). Original (incorrect) note retained below for history:
+  - _orig:_ "Gazebo Classic renders only 2 camera sensors per world; the 3rd starves…
+    NOT fixable by rtf (n=3 @ rtf=3 still failed) or timeout. Deeper fix = Gz Sim/ROS2."
 
 ## rtf_override — non-binding
 feature n=4 across rtf {5,10,40,80} → 65,66,63,65 steps/s (flat). The machine is

@@ -29,9 +29,12 @@ def main() -> int:
     n = env.num_envs
     print(f"[rec] camera VecEnv n_envs={n}, recorder out={OUT}", flush=True)
     env.reset()
-    for i in range(80):  # cars go off-track quickly -> several episode flushes
+    n_steps = int(os.getenv("REC_STEPS", "80"))  # raise to reproduce the long-run crash
+    for i in range(n_steps):
         actions = np.stack([env.action_space.sample() for _ in range(n)])
         env.step(actions)
+        if i % 200 == 0 and i:
+            print(f"[rec] step {i}/{n_steps} still alive", flush=True)
     env.close()
 
     shards = sorted(glob.glob(os.path.join(OUT, "**", "*.npz"), recursive=True))

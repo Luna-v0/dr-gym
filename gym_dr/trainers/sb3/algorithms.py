@@ -9,7 +9,14 @@ OFF_POLICY = {"sac", "td3", "ddpg"}
 def import_algos() -> dict[str, type]:
     from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
 
-    return {"ppo": PPO, "sac": SAC, "td3": TD3, "a2c": A2C, "ddpg": DDPG}
+    algos = {"ppo": PPO, "sac": SAC, "td3": TD3, "a2c": A2C, "ddpg": DDPG}
+    try:  # sb3-contrib is optional (only the LSTM architecture arm needs it)
+        from sb3_contrib import RecurrentPPO
+
+        algos["recurrent_ppo"] = RecurrentPPO
+    except ImportError:
+        pass
+    return algos
 
 
 def make_model(env, *, name: str, policy: str, kwargs: dict[str, Any], device: str, tensorboard_log: str | None):

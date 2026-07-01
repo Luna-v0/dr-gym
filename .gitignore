@@ -21,3 +21,7 @@ venv/
 
 # run logs
 logs/
+
+# scratch / notebook checkpoints
+tmp/
+.ipynb_checkpoints/

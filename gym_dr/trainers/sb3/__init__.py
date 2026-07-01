@@ -214,9 +214,14 @@ class Sb3Trainer:
         )
         update_training_status(run_dir, "running")
 
+        # SB3 callbacks tick once per VecEnv step (not per env-timestep), so with
+        # N cars a raw ``checkpoint_freq`` saves every freq*N timesteps — at n=12 the
+        # first checkpoint wouldn't land until 1.2M steps. Divide by the env count so
+        # ``checkpoint_freq`` always means TIMESTEPS, regardless of car count.
+        _n_envs = int(getattr(env, "num_envs", 1) or 1)
         callbacks = [
             CtxCheckpointCallback(
-                save_freq=max(1, ctx.training.checkpoint_freq),
+                save_freq=max(1, ctx.training.checkpoint_freq // _n_envs),
                 save_path=str(checkpoints_dir),
                 name_prefix=f"{self.name}_checkpoint",
                 ctx=ctx,
@@ -247,11 +252,17 @@ class Sb3Trainer:
         # (OrderedSplit), measure track generalisation across those worlds;
         # otherwise evaluate on the current training world via SB3's
         # EvalCallback. Both expose ``last_mean_reward`` for the TrainResult.
+        # Same VecEnv-tick caveat as the checkpoint callback: eval_freq is in
+        # callback ticks (VecEnv steps), so with N cars a raw eval_freq evaluates
+        # every freq*N timesteps. At n_cars=2 with eval_freq == chunk length, eval
+        # NEVER fired within a chunk (no held-out metrics, no eval-phase perception
+        # frames, mastery early-stop never triggered). Divide by the env count so
+        # eval_freq means TIMESTEPS.
         if ctx.eval_worlds:
             eval_callback: Any = MultiWorldEvalCallback(
                 ctx=ctx,
                 eval_worlds=ctx.eval_worlds,
-                eval_freq=max(1, ctx.training.eval_freq),
+                eval_freq=max(1, ctx.training.eval_freq // _n_envs),
                 n_eval_episodes=ctx.training.n_eval_episodes,
                 best_model_save_path=str(best_model_dir),
                 deterministic=True,
@@ -267,7 +278,7 @@ class Sb3Trainer:
                 ctx=ctx,
                 best_model_save_path=str(best_model_dir),
                 log_path=str(eval_log_dir),
-                eval_freq=max(1, ctx.training.eval_freq),
+                eval_freq=max(1, ctx.training.eval_freq // _n_envs),
                 n_eval_episodes=ctx.training.n_eval_episodes,
                 deterministic=True,
                 render=False,

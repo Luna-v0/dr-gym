@@ -74,6 +74,45 @@ def _make_eval_collector(
     return _cb, count, episodes
 
 
+def _eval_policy(model, vec, *, n_eval_episodes: int, deterministic: bool, callback):
+    """Evaluate ``model`` on ``vec`` for ``n_eval_episodes``, calling ``callback`` with
+    the same ``{"done", "info"}`` locals contract as SB3's ``evaluate_policy``.
+
+    For a RECURRENT policy (sb3-contrib ``RecurrentPPO``, detected via ``policy.lstm_actor``)
+    SB3's ``evaluate_policy`` is WRONG — it calls ``predict(obs)`` without carrying the
+    LSTM hidden state, so the recurrent net would be judged as if memoryless. Here we run
+    the loop manually, threading ``state`` + ``episode_start`` so the hidden state persists
+    within an episode and resets at its boundary. Non-recurrent models fall straight
+    through to SB3's ``evaluate_policy`` (unchanged behaviour). Returns ``(mean, std)``."""
+    import numpy as np
+
+    is_recurrent = hasattr(getattr(model, "policy", None), "lstm_actor")
+    if not is_recurrent:
+        from stable_baselines3.common.evaluation import evaluate_policy
+
+        return evaluate_policy(model, vec, n_eval_episodes=n_eval_episodes,
+                               deterministic=deterministic, warn=False, callback=callback)
+
+    n_envs = vec.num_envs
+    obs = vec.reset()
+    states = None
+    episode_starts = np.ones((n_envs,), dtype=bool)
+    cur = np.zeros((n_envs,), dtype=np.float64)
+    ep_rewards: list[float] = []
+    while len(ep_rewards) < n_eval_episodes:
+        actions, states = model.predict(
+            obs, state=states, episode_start=episode_starts, deterministic=deterministic)
+        obs, rewards, dones, infos = vec.step(actions)
+        cur += np.asarray(rewards, dtype=np.float64)
+        episode_starts = np.asarray(dones, dtype=bool)   # reset LSTM state at episode end
+        for i in range(n_envs):
+            callback({"done": bool(dones[i]), "info": infos[i]}, {})
+            if dones[i]:
+                ep_rewards.append(float(cur[i])); cur[i] = 0.0
+    sel = ep_rewards[:n_eval_episodes]
+    return float(np.mean(sel)), float(np.std(sel))
+
+
 def _log_eval_paths(logger: Any, world: str, timestep: int, episodes: list[dict]) -> None:
     """Render the eval trajectories for *world* and log them as TB images.
 
@@ -369,10 +408,34 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
         self.best_mean_reward = -float("inf")
         self._es_init()
 
+    def _can_set_world(self, vec) -> bool:
+        """True if the (shared) env can actually hot-swap tracks. The multi-car
+        backend (MultiAgentDeepRacerEnv) has no set_world, so env_method('set_world')
+        is a silent no-op — iterating eval_worlds there would 'evaluate' every held-out
+        world on the CURRENT training tracks and emit garbage per-world / gap metrics.
+        MultiCarVecEnv advertises ``can_set_world=False``; single-car envs lack the attr
+        (get_attr raises) and are assumed swappable."""
+        try:
+            return bool(vec.get_attr("can_set_world")[0])
+        except Exception:  # noqa: BLE001 — attr absent (single-car) => assume swappable
+            return True
+
     def _swap(self, vec, world: str) -> None:
         import numpy as np
 
         vec.env_method("set_world", world)
+        self.model._last_obs = vec.reset()
+        self.model._last_episode_starts = np.ones((vec.num_envs,), dtype=bool)
+
+    def _resume_reset(self, vec, world) -> None:
+        """Reset the shared env so training resumes on clean episodes. Single-car:
+        swap back to the training world. Either way this runs AFTER the recorder phase
+        is restored to 'train', so the post-eval in-progress episode is started fresh
+        under 'train' (not stamped 'eval' and flushed to eval/ — phase contamination)."""
+        import numpy as np
+
+        if world is not None and self._can_set_world(vec):
+            vec.env_method("set_world", world)
         self.model._last_obs = vec.reset()
         self.model._last_episode_starts = np.ones((vec.num_envs,), dtype=bool)
 
@@ -381,15 +444,16 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
             return True
 
         import numpy as np
-        from stable_baselines3.common.evaluation import evaluate_policy
 
         state = getattr(self._ctx, "metrics_state", None)
         train_world = getattr(state, "world_name", None)
         vec = self.model.get_env()
+        can_swap = self._can_set_world(vec)
 
         capture_paths = bool(getattr(self._ctx.training, "eval_path_plots", False))
         per_world: dict[str, float] = {}
         counts_per_world: dict[str, dict] = {}
+        train_clean_rate = None
         if state is not None:
             state.use_eval_reward = True
         # Tag perception-dataset shards captured during eval as phase="eval" (no-op
@@ -400,50 +464,66 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
         except Exception:  # noqa: BLE001
             pass
         try:
-            for world in self.eval_worlds:
-                self._swap(vec, world)
+            if can_swap:
+                for world in self.eval_worlds:
+                    self._swap(vec, world)
+                    eval_cb, counts, episodes = _make_eval_collector(capture_paths)
+                    mean_reward, _ = _eval_policy(
+                        self.model, vec, n_eval_episodes=self.n_eval_episodes,
+                        deterministic=self.deterministic, callback=eval_cb)
+                    per_world[world] = float(mean_reward)
+                    counts_per_world[world] = counts
+                    if capture_paths:
+                        _log_eval_paths(self.logger, world, int(self.num_timesteps), episodes)
+                # Held-in train-world score for a live generalization gap.
+                if train_world is not None and train_world not in per_world:
+                    self._swap(vec, train_world)
+                    eval_cb, train_counts, _eps = _make_eval_collector(False)
+                    _eval_policy(
+                        self.model, vec, n_eval_episodes=self.n_eval_episodes,
+                        deterministic=self.deterministic, callback=eval_cb)
+                    train_clean_rate = train_counts["clean"] / max(1, self.n_eval_episodes)
+            else:
+                # MULTI-CAR: no set_world. Evaluate ONCE on the CURRENT training tracks
+                # (deterministic policy) — an honest in-distribution eval that drives the
+                # per-chunk early-stop and captures eval-phase dataset frames. We do NOT
+                # iterate eval_worlds (that would fake per-held-out-world metrics + a ~0
+                # generalization gap). True held-out generalization + held-out dataset
+                # frames are a separate single-car pass (scripts/eval_physical_tracks.py,
+                # scripts/perception_capture_heldout.py).
                 eval_cb, counts, episodes = _make_eval_collector(capture_paths)
-                mean_reward, _ = evaluate_policy(
-                    self.model,
-                    vec,
-                    n_eval_episodes=self.n_eval_episodes,
-                    deterministic=self.deterministic,
-                    warn=False,
-                    callback=eval_cb,
-                )
-                per_world[world] = float(mean_reward)
-                counts_per_world[world] = counts
-                if capture_paths:
-                    _log_eval_paths(self.logger, world, int(self.num_timesteps), episodes)
-            # Also score the CURRENT training world (held-in) so we can report a
-            # live generalization gap = train clean-completion − held-out mean.
-            # One extra eval, on the world we restore to anyway.
-            train_clean_rate = None
-            if train_world is not None and train_world not in per_world:
-                self._swap(vec, train_world)
-                eval_cb, train_counts, _eps = _make_eval_collector(False)
-                evaluate_policy(
+                mean_reward, _ = _eval_policy(
                     self.model, vec, n_eval_episodes=self.n_eval_episodes,
-                    deterministic=self.deterministic, warn=False, callback=eval_cb,
-                )
-                train_clean_rate = train_counts["clean"] / max(1, self.n_eval_episodes)
-            # Restore the world training was on so the next rollout continues
-            # on the right track (the env is shared with training).
-            if train_world is not None:
-                self._swap(vec, train_world)
+                    deterministic=self.deterministic, callback=eval_cb)
+                per_world["current_tracks"] = float(mean_reward)
+                counts_per_world["current_tracks"] = counts
+                if capture_paths:
+                    _log_eval_paths(self.logger, "current_tracks",
+                                    int(self.num_timesteps), episodes)
         finally:
             if state is not None:
                 state.use_eval_reward = False
+            # Restore phase to "train" BEFORE the resume reset (fixes eval->train
+            # contamination: else the post-eval episode is stamped "eval" and flushed
+            # to eval/).
             try:
                 vec.env_method("set_recorder_phase", "train")
                 vec.env_method("set_metrics_eval_mode", False)
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                self._resume_reset(vec, train_world)
+            except Exception:  # noqa: BLE001
+                pass
 
         agg = float(np.mean(list(per_world.values()))) if per_world else float("nan")
         self.last_mean_reward = agg
-        for world, m in per_world.items():
-            self.logger.record(f"eval/{world}_mean_reward", m)
+        # Per-world reward only when the worlds are REAL (held-out swap). Multi-car's
+        # single "current_tracks" entry is logged via the counts block below as honest
+        # in-distribution eval, not as a held-out world.
+        if can_swap:
+            for world, m in per_world.items():
+                self.logger.record(f"eval/{world}_mean_reward", m)
         self.logger.record("eval/mean_reward", agg)
         self.logger.record("eval/n_worlds", float(len(per_world)))
         # Track-out resets + completion rates, per-track and aggregated. The
@@ -486,8 +566,10 @@ class MultiWorldEvalCallback(_EarlyStopMixin, BaseCallback):
             self._save_best()
 
         self._ctx.report_eval(agg, int(self.num_timesteps))
-        # Track-mastery early stop, measured across all eval worlds this round.
-        total_eps = self.n_eval_episodes * max(1, len(self.eval_worlds))
+        # Track-mastery early stop, measured across what was actually evaluated this
+        # round (held-out worlds when swappable; the single current-tracks eval for
+        # multi-car) — NOT len(eval_worlds), which multi-car never iterates.
+        total_eps = self.n_eval_episodes * max(1, len(counts_per_world))
         if self._apply_early_stop(
             sum(c["n"] for c in counts_per_world.values()), total_eps
         ):

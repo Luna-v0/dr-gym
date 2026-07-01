@@ -14,6 +14,7 @@ to see them all together.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -25,6 +26,32 @@ def _mlflow():
     import mlflow
 
     return mlflow
+
+
+def _set_experiment_racesafe(mlflow, name: str) -> None:
+    """``mlflow.set_experiment`` is NOT concurrency-safe on the file store.
+
+    When N HPO workers boot together (or a ``--rm`` worker restarts), each one
+    sees the experiment "doesn't exist" and races to ``create_experiment``; the
+    losers raise ``MlflowException: Experiment '<name>' already exists`` and the
+    whole trial is marked FAILED. (Empirically this skews toward whichever arm
+    sets up a hair slower — e.g. the LSTM trials lost the create race to the MLP
+    trial every time.) Retry by binding to the now-existing experiment by id.
+    """
+    from mlflow.exceptions import MlflowException
+
+    for attempt in range(6):
+        try:
+            mlflow.set_experiment(name)
+            return
+        except MlflowException:
+            exp = mlflow.get_experiment_by_name(name)
+            if exp is not None:                      # someone else won the race
+                mlflow.set_experiment(experiment_id=exp.experiment_id)
+                return
+            if attempt == 5:
+                raise                                # genuinely cannot create it
+            time.sleep(0.25 * (attempt + 1))         # transient FS contention
 
 
 def _tags_for(cfg: ExperimentConfig) -> dict[str, str]:
@@ -50,7 +77,7 @@ def start_run(cfg: ExperimentConfig) -> Iterator[Any]:
     """
     mlflow = _mlflow()
     mlflow.set_tracking_uri(cfg.tracking.mlflow_tracking_uri)
-    mlflow.set_experiment(cfg.tracking.mlflow_experiment)
+    _set_experiment_racesafe(mlflow, cfg.tracking.mlflow_experiment)
     with mlflow.start_run(run_name=cfg.name) as run:
         mlflow.set_tags(_tags_for(cfg))
         mlflow.log_params(_stringify_params(cfg.flat_params()))

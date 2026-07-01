@@ -82,6 +82,28 @@ Moderate, **GPU-free to build** (controller + mutable-range wrappers + hook). Va
 **robustness-vs-randomization curve** (success at increasing *fixed* DR vs ADR-grown), reported separately
 from the curriculum's track-generalization gap.
 
+## Multi-car DR warmup (the ADR substitute for `MultiCarVecEnv`) — 2026-06-28
+
+Feedback-ADR needs an in-loop held-out clean-completion signal to widen knobs. The
+multi-car VecEnv has none (it can't `set_world`, so the in-sim eval is disabled) and it
+reads each DR knob as its **static high** (`spec_bounds(spec)[1]`) with **no ADR
+controller**. Applying every magnitude at full strength from step 0 made the asym oracle
+unlearnable: an unobservable ±15° per-episode steering bias + full feature noise gave
+~2-step episodes / 100% off-track / flat 5% progress (see
+[status-2026-06-28](status-2026-06-28.md)).
+
+`MultiCarVecEnv` therefore has a **self-counted linear DR warmup** (`_dr_scale()`): a
+factor ∈ [0,1] that grows linearly over the first `GYM_DR_DR_WARMUP_STEPS` timesteps and
+multiplies every magnitude knob (per-episode steering/speed bias, feature noise, per-step
+actuator noise). The policy learns to **drive first** (near-clean, survivable early
+episodes), then to **counter** the perturbations as they reach full strength —
+schedule-based, not feedback-based (no eval needed). `0` = off (full strength; the camera
+run keeps it off). Forwarded into the container by `app.py`, read by the multi-car
+factory. Pair with `frame_stack > 1` so the policy has temporal context to infer an
+unobservable per-episode bias (its drift signature) — see
+[asymmetric-architecture](asymmetric-architecture.md).
+
 ## Status line
 static DR ✅ · **ADR ✅ built** (controller + live wrappers + SB3 & custom-trainer eval hooks; tested) ·
+**multi-car DR warmup ✅** (linear, self-counted; multi-car's feedback-ADR substitute) ·
 reset DR (env-side) ⏳ signed off · ADR/DR validation run ⏳.

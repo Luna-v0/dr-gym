@@ -76,5 +76,10 @@ The branch adds `SafetyDeepRacerEnv` (a CMDP 6-tuple with a `cost`) + a `safety_
 adopt **OmniSafe** (PPO/PID-Lagrangian, validate on Safety-Gymnasium first — recommended) vs hand-roll
 Lagrangian-PPO. Also: OK to install `safety_gymnasium` (+ the branch image) to validate?
 
+### D10 `[DISS]` Camera-multicar max car count — accept **n=4** stable, or invest in staggered controller bringup for **n=8**?
+**Recommendation (2026-07-01):** accept **n=4** as the stable max for the camera→feature dataset collector now, and defer n=8 unless dataset volume demands it. Full analysis: `docs/reports/camera-multicar-reset-storm.md`.
+The n=8 camera run "reset-storms" and its stalled container is force-killed (`rc=137` SIGKILL — **not** OOM: 61 GiB box, container <2 GiB; the killer is the watchdog/test-harness) on this 8-core box; the boundary is sharp — **n=4 works, n≥5 storms** (`/tmp/dr_drive/bisect_result.txt`: `n=5: BRINGUP-FAILED (no training start in 320s)`; `bisect_n5.log`/`bisect_n6.log` both exit `rc=137`). The real cause is **oversubscription** (controller-manager bringup contention + pose/TF flood + CPU starvation), **not** an XML cap (the launch now generalizes to 8 blocks) and **not** crowding (arenas are 300 m apart). The discriminator is **shards-per-reset**: n=8 yields ~0.36–0.48 (~20–24 shards/min) vs n=4's ~1.0 (350–540 shards/min); n=4 actually has *more* resets, they just produce usable data. Controller-spawner failures are a bringup-only handful (2–4 at n=8, 10 at n=4) and don't distinguish the cases.
+**Decide:** (1) **Accept n=4** — cap the collector, no further engineering; or (2) **invest in staggered per-arena controller bringup** — spawn arenas sequentially so the ~24 controller spawners don't dogpile the CPU at once, targeting n=8. Note: a **hard 8-car ceiling** remains either way — only `racecar_0..racecar_7` blocks + a one-byte collide-bitmask `0x01..0x80` exist, so n>8 needs new launch blocks regardless. Flip this heading to `✅` with a **Resolved (date):** block once chosen.
+
 ## Resolved
 See "Answered (2026-06-21)" above.
