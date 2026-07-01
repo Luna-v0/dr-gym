@@ -22,7 +22,7 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     centerline_quadratic,
-    train,
+    Study,
 )
 from gym_dr.networks import DeepRacerCNN
 
@@ -81,4 +81,4 @@ experiment = ExperimentConfig(
 if __name__ == "__main__":
     print(f"[demo] n_cars={N_CARS} camera_obs={CAMERA} world={WORLD} — "
           f"connect VNC to vnc://localhost:5900")
-    train(experiment)
+    Study(experiment).run()

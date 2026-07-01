@@ -38,7 +38,7 @@ from gym_dr import (                                              # noqa: E402
     ADR, ContinuousActionSpaceConfig, CameraObs, EnvironmentConfig,
     ExperimentConfig, OrderedSplit, Range, Sb3Trainer, TraceConfig,
     TrackingConfig, TrainingConfig, clean_completion, progress_per_step,
-    existing_tracks, train, OfftrackRate,
+    existing_tracks, Study, OfftrackRate,
 )
 from gym_dr.app import train as _train                           # noqa: E402  (host loop calls this)
 from gym_dr.envs.dispatch import build_env                       # noqa: E402

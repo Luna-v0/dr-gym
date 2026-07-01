@@ -13,7 +13,7 @@ from gym_dr import (
     FeatureObs,
     Sb3Trainer,
     TrainingConfig,
-    train,
+    Study,
 )
 
 
@@ -40,7 +40,7 @@ def main() -> int:
             n_eval_episodes=1,
         ),
     )
-    train(exp)
+    Study(exp).run()
     print("[smoke-train] TRAIN SMOKE OK", flush=True)
     return 0
 

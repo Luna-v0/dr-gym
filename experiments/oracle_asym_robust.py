@@ -103,5 +103,5 @@ experiment = ExperimentConfig(
 
 
 if __name__ == "__main__":
-    from gym_dr import train
-    train(experiment)
+    from gym_dr import Study
+    Study(experiment).run()

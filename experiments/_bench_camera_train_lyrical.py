@@ -18,7 +18,7 @@ from gym_dr import (
     CameraObs,
     Sb3Trainer,
     TrainingConfig,
-    train,
+    Study,
 )
 from gym_dr.networks import DeepRacerCNN
 
@@ -47,7 +47,7 @@ def main() -> int:
         training=TrainingConfig(total_timesteps=512, checkpoint_freq=10**9, eval_freq=10**9),
     )
     t0 = time.monotonic()
-    train(exp)
+    Study(exp).run()
     print(f"[camtrain] device={DEVICE} total_wall={time.monotonic()-t0:.1f}s "
           f"(512 steps, trial-18 DeepRacerCNN, n_cars=2)", flush=True)
     print("[camtrain] CAMTRAIN DONE", flush=True)

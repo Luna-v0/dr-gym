@@ -43,7 +43,7 @@ from gym_dr import (                                       # noqa: E402
     TRACKS,
     centerline_quadratic,
     clean_completion,
-    train,
+    Study,
 )
 from gym_dr.envs.dispatch import build_env                 # noqa: E402
 from gym_dr.perception import ACTOR_FEATURES               # noqa: E402
@@ -115,4 +115,4 @@ experiment = ExperimentConfig(
 
 
 if __name__ == "__main__":
-    train(experiment)
+    Study(experiment).run()

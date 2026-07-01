@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import optuna
 
-from gym_dr import train
+from gym_dr import Study
 from gym_dr.rewards import make_progress_reward, make_weighted_reward
 from experiments.end_to_end_ppo import experiment as base_experiment
 
@@ -67,4 +67,4 @@ def build_experiment():
 
 
 if __name__ == "__main__":
-    train(build_experiment())
+    Study(build_experiment()).run()

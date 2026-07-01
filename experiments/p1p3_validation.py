@@ -42,7 +42,7 @@ from gym_dr import (
     centerline_quadratic,
     clean_completion,
     time_trial,
-    train,
+    Study,
 )
 from gym_dr.networks import DeepRacerCNN
 
@@ -128,4 +128,4 @@ experiment = ExperimentConfig(
 
 
 if __name__ == "__main__":
-    train(experiment)
+    Study(experiment).run()

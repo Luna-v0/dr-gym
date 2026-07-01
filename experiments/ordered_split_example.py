@@ -20,6 +20,7 @@ from gym_dr import (
     ExperimentConfig,
     OrderedSplit,
     Sb3Trainer,
+    Study,
     TraceConfig,
     TrackingConfig,
     TrainingConfig,
@@ -46,6 +47,4 @@ experiment = ExperimentConfig(
 
 
 if __name__ == "__main__":
-    from gym_dr import train
-
-    train(experiment)
+    Study(experiment).run()

@@ -19,7 +19,7 @@ from gym_dr import (
     TrackingConfig,
     TrainingConfig,
     WorldsConfig,
-    study,
+    Study,
 )
 
 
@@ -99,10 +99,10 @@ experiment = base
 
 
 if __name__ == "__main__":
-    study(
+    Study(
         base,
         search_space,
         study_name="hpo_example",
         n_trials=40,
         n_parallel=4,
-    )
+    ).run()

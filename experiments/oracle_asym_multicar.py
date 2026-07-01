@@ -40,7 +40,7 @@ os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"        # 11-feature actor ve
 from gym_dr import (                                       # noqa: E402
     ADR, ContinuousActionSpaceConfig, EnvironmentConfig, ExperimentConfig,
     FeatureObs, OrderedSplit, Range, Sb3Trainer, TraceConfig, TrackingConfig,
-    TrainingConfig, TRACKS, centerline_quadratic, clean_completion, train,
+    TrainingConfig, TRACKS, centerline_quadratic, clean_completion, Study,
 )
 from gym_dr.asymmetric import AsymmetricActorCriticPolicy   # noqa: E402
 from gym_dr.envs.dispatch import build_env                  # noqa: E402
@@ -147,4 +147,4 @@ experiment = ExperimentConfig(
 
 
 if __name__ == "__main__":
-    train(experiment)
+    Study(experiment).run()

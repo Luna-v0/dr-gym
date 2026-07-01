@@ -37,7 +37,7 @@ os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"        # 11-feature actor ve
 from gym_dr import (                                       # noqa: E402
     ACL, ADR, ContinuousActionSpaceConfig, EnvironmentConfig, ExperimentConfig,
     FeatureObs, Range, Sb3Trainer, TraceConfig, TrackingConfig, TrainingConfig,
-    TRACKS, centerline_quadratic, clean_completion, study, OfftrackRate,
+    TRACKS, centerline_quadratic, clean_completion, Study, OfftrackRate,
 )
 from gym_dr.asymmetric import (                             # noqa: E402
     AsymmetricActorCriticPolicy, asymmetric_recurrent_policy)
@@ -162,10 +162,10 @@ def search_space(trial) -> dict:
 
 
 if __name__ == "__main__":
-    study(
+    Study(
         base,
         search_space,
         study_name=NAME,
         n_trials=int(os.getenv("GYM_DR_HPO_TRIALS", "40")),
         n_parallel=int(os.getenv("GYM_DR_HPO_PARALLEL", "2")),
-    )
+    ).run()

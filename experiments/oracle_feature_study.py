@@ -37,7 +37,7 @@ os.environ["GYM_DR_FEATURE_SET"] = "actor_extended"
 from gym_dr import (                                       # noqa: E402
     ACL, ADR, ContinuousActionSpaceConfig, EnvironmentConfig, ExperimentConfig,
     FeatureObs, Range, Sb3Trainer, TraceConfig, TrackingConfig, TrainingConfig,
-    TRACKS, centerline_quadratic, clean_completion, train,
+    TRACKS, centerline_quadratic, clean_completion, Study,
 )
 from gym_dr.envs.dispatch import build_env                          # noqa: E402
 from gym_dr.perception import ACTOR_FEATURES                        # noqa: E402
@@ -107,4 +107,4 @@ experiment = ExperimentConfig(
 
 
 if __name__ == "__main__":
-    train(experiment)
+    Study(experiment).run()

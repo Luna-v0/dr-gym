@@ -110,6 +110,6 @@ if __name__ == "__main__":
     # found this is the only lever that scales: ~83 steps/s at 2 workers vs the
     # GPU-render ceiling of ~54 that 2 GPU-rendered workers actually fall *below*
     # (~40 aggregate, contended). 2 is the sweet spot (4 oversubscribes the CPU).
-    study(base, search_space, study_name=STUDY_NAME, n_trials=N_TRIALS,
+    Study(base, search_space, study_name=STUDY_NAME, n_trials=N_TRIALS,
           n_parallel=N_PARALLEL,
-          extra_env={"LIBGL_ALWAYS_SOFTWARE": "1", "GALLIUM_DRIVER": "llvmpipe"})
+          extra_env={"LIBGL_ALWAYS_SOFTWARE": "1", "GALLIUM_DRIVER": "llvmpipe"}).run()

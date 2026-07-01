@@ -8,7 +8,7 @@ try:                                                         # noqa: E402
     import experiments.oracle_hpo as h
 except ModuleNotFoundError:
     import oracle_hpo as h
-from gym_dr import train                                     # noqa: E402
+from gym_dr import Study                                     # noqa: E402
 
 
 class _FT:
@@ -30,4 +30,4 @@ _cfg = dataclasses.replace(
 experiment = _cfg
 
 if __name__ == "__main__":
-    train(experiment)
+    Study(experiment).run()

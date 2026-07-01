@@ -35,7 +35,7 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     object_avoidance_aware,
-    study,
+    Study,
     time_trial,
     existing_tracks,
 )
@@ -209,10 +209,10 @@ experiment = base
 
 
 if __name__ == "__main__":
-    study(
+    Study(
         base,
         search_space,
         study_name=STUDY_NAME,
         n_trials=N_TRIALS,
         n_parallel=N_PARALLEL,
-    )
+    ).run()

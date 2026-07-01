@@ -26,7 +26,7 @@ from gym_dr import (
     TrainingConfig,
     WorldsConfig,
     center_line,
-    study,
+    Study,
 )
 
 
@@ -81,10 +81,10 @@ experiment = base
 
 
 if __name__ == "__main__":
-    study(
+    Study(
         base,
         search_space,
         study_name="trace_smoke",
         n_trials=3,
         n_parallel=1,
-    )
+    ).run()
