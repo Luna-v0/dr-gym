@@ -32,6 +32,12 @@ from gym_dr.config import (
     load_search_space,
 )
 from gym_dr.envs import time_trial
+from gym_dr.data_store import (
+    DataStore,
+    NullDataStore,
+    SQLiteDataStore,
+    make_data_store,
+)
 from gym_dr.domain_randomization import ADR, DomainRandomization
 from gym_dr.early_stopping import (
     AllOf,
@@ -96,6 +102,10 @@ __all__ = [
     "Categorical",
     "Study",
     "StudyResult",
+    "DataStore",
+    "SQLiteDataStore",
+    "NullDataStore",
+    "make_data_store",
     "EnvironmentConfig",
     "CameraObs",
     "FeatureObs",
