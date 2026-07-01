@@ -87,7 +87,20 @@ def train(experiment: ExperimentConfig) -> Any:
       the final eval reward (float).
     """
     if os.getenv("GYM_DR_IN_CONTAINER"):
-        return _train_one_chunk(experiment)
+        result = _train_one_chunk(experiment)
+        # rclpy/DDS context finalization segfaults (rc=139) when a multi-car
+        # CAMERA container exits — even after a clean run + a clean executor stop
+        # (the native teardown of the gz bridges/DDS entities crashes with no
+        # Python traceback). The chunk's data + checkpoints are already flushed,
+        # so hard-exit to skip that buggy native teardown and return a clean rc.
+        # ONLY for a single-chunk train container — NOT the HPO worker
+        # (GYM_DR_WORKER), which loops many trials in one process.
+        if not os.getenv("GYM_DR_WORKER"):
+            import sys
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
+        return result
     return _train_host(experiment)
 
 
