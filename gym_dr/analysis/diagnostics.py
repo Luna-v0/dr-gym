@@ -160,6 +160,37 @@ def run_diagnostics(
     return pd.DataFrame(rows)
 
 
+def aggregate_runs(
+    run_dirs: "List[Any]",
+    *,
+    phase: "str | None" = "eval",
+    min_speed: float = 1.0,
+) -> "dict[str, Any]":
+    """Diagnose several run dirs (e.g. one per seed / config) and aggregate them.
+
+    Returns ``{"per_run": [summary, ...], "overall": {...}}`` where each per-run
+    summary is :func:`summarize_diagnostics` plus its ``run`` path, and ``overall``
+    averages ``mean_quality`` / ``clean_completion_rate`` across the runs that
+    produced episodes. This is the unit for cross-seed comparison (feed the per-run
+    ``mean_quality`` to rliable for IQM + CIs when ≥3 seeds are available).
+    """
+    per_run: List[dict] = []
+    for rd in run_dirs:
+        summary = summarize_diagnostics(run_diagnostics(rd, phase=phase, min_speed=min_speed))
+        summary["run"] = str(rd)
+        per_run.append(summary)
+    scored = [r for r in per_run if r["n_episodes"] > 0]
+    n = len(scored)
+    overall = {
+        "n_runs": len(per_run),
+        "n_scored_runs": n,
+        "mean_quality": (sum(r["mean_quality"] for r in scored) / n) if n else 0.0,
+        "mean_clean_completion": (
+            sum(r["clean_completion_rate"] for r in scored) / n) if n else 0.0,
+    }
+    return {"per_run": per_run, "overall": overall}
+
+
 def summarize_diagnostics(diag: "pd.DataFrame") -> "dict[str, Any]":
     """Roll a per-episode diagnostics DataFrame up to a run-level verdict."""
     n = int(len(diag))

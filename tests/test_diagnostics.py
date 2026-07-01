@@ -1,10 +1,13 @@
 """Tests for the diagnostic quality metric (gym_dr.analysis.diagnostics)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 from gym_dr.analysis.diagnostics import (
+    aggregate_runs,
     episode_diagnostics,
     failure_modes,
     quality_score,
@@ -130,3 +133,27 @@ def test_run_diagnostics_empty_when_no_trace(tmp_path):
     diag = run_diagnostics(tmp_path)
     assert len(diag) == 0
     assert summarize_diagnostics(diag)["n_episodes"] == 0
+
+
+def _write_eval_episode(run_dir, ep, speed, progress, offtrack):
+    steps_dir = run_dir / "trace" / "steps"
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    df = _episode(speed=speed, progress=progress, offtrack=offtrack)
+    df["episode"] = ep
+    df.to_parquet(steps_dir / f"ep_{ep:06d}.parquet")
+
+
+def test_aggregate_runs_across_seeds(tmp_path):
+    # run_a: a clean lap; run_b: a crawler; run_c: no trace (unscored).
+    ra, rb, rc = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    _write_eval_episode(ra, 0, [3.0, 4.0], [50.0, 100.0], False)
+    _write_eval_episode(rb, 0, [1.0, 1.0], [5.0, 6.0], False)
+    agg = aggregate_runs([ra, rb, rc], phase="eval")
+    assert agg["overall"]["n_runs"] == 3
+    assert agg["overall"]["n_scored_runs"] == 2         # rc had no episodes
+    # run_a quality 1.0, run_b quality 0.0 -> mean 0.5
+    assert abs(agg["overall"]["mean_quality"] - 0.5) < 1e-9
+    assert abs(agg["overall"]["mean_clean_completion"] - 0.5) < 1e-9
+    by_run = {Path(r["run"]).name: r for r in agg["per_run"]}
+    assert by_run["a"]["clean_completion_rate"] == 1.0
+    assert by_run["b"]["dominant_failure"] == "crawl"

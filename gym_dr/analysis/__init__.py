@@ -6,6 +6,7 @@ metric (the "reward-as-metric" that scores *how well* a policy drives, used for
 analysis — never for the agent to learn).
 """
 from gym_dr.analysis.diagnostics import (
+    aggregate_runs,
     episode_diagnostics,
     failure_modes,
     quality_score,
@@ -14,6 +15,7 @@ from gym_dr.analysis.diagnostics import (
 )
 
 __all__ = [
+    "aggregate_runs",
     "episode_diagnostics",
     "failure_modes",
     "quality_score",
