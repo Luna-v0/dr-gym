@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -698,15 +699,31 @@ class MlflowKVWriter(KVWriter):
 
 
 class RewardMetricsCallback(BaseCallback):
-    """Drain per-episode DeepRacer metrics into the SB3 logger.
+    """Drain per-episode DeepRacer metrics into the SB3 logger, with trend lines.
 
     The orchestrator wraps the env so every terminal step's ``info`` dict
-    carries a ``dr_episode`` summary (see ``gym_dr/metrics.py``). This
-    callback inspects ``self.locals["infos"]`` on each step, picks up any
-    finalized summaries, and pushes their keys/values into the logger via
-    ``record_mean`` — they then surface in TensorBoard scalars and (via the
-    ``MlflowKVWriter`` in the model's logger) MLflow metrics, averaged per rollout.
+    carries a ``dr_episode`` summary (see ``gym_dr/metrics.py``). This callback
+    inspects ``self.locals["infos"]`` each step, picks up any finalized
+    summaries, and pushes their keys/values into the logger. Three views of each
+    ``dr/ep_*`` metric are logged (all reach TensorBoard + MLflow):
+
+    - the raw per-rollout mean (``record_mean``) — noisy, one bad rollout (e.g.
+      right after a track swap) is indistinguishable from a real regression;
+    - ``<key>_ema`` — an exponential moving average across ALL episodes so far
+      (``alpha`` close to 1 = smooth secular trend); one float, ~zero overhead;
+    - ``<key>_win<W>`` — the mean over the last ``W`` episodes (local trend).
+
+    The EMA/window state lives on the callback instance, which the trainer
+    creates once and reuses across every chunk of a rotation — so the trend lines
+    are continuous across track swaps, not reset per chunk.
     """
+
+    def __init__(self, window: int = 100, ema_alpha: float = 0.99) -> None:
+        super().__init__()
+        self._window = max(1, int(window))
+        self._alpha = min(max(float(ema_alpha), 0.0), 1.0)
+        self._ema: "dict[str, float]" = {}
+        self._buffers: "dict[str, deque]" = {}
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos") or []
@@ -716,9 +733,19 @@ class RewardMetricsCallback(BaseCallback):
                 continue
             for key, value in summary.items():
                 try:
-                    self.logger.record_mean(key, float(value))
+                    v = float(value)
                 except (TypeError, ValueError):
                     continue
+                self.logger.record_mean(key, v)
+                # Cross-rollout trend lines (persist across chunks).
+                prev = self._ema.get(key)
+                self._ema[key] = v if prev is None else self._alpha * prev + (1.0 - self._alpha) * v
+                buf = self._buffers.get(key)
+                if buf is None:
+                    buf = self._buffers[key] = deque(maxlen=self._window)
+                buf.append(v)
+                self.logger.record(f"{key}_ema", self._ema[key])
+                self.logger.record(f"{key}_win{self._window}", sum(buf) / len(buf))
         return True
 
 
