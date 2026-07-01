@@ -20,8 +20,8 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
 RUN cd /tmp && uv pip install --system --break-system-packages --no-cache-dir \
       --index-url ${TORCH_INDEX} torch \
  && uv pip install --system --break-system-packages --no-cache-dir \
-      "stable-baselines3>=2.3" tensorboard "mlflow>=2.10" "optuna>=3.5" gymnasium \
-      pandas pyarrow
+      "stable-baselines3>=2.3" "sb3-contrib>=2.3" tensorboard "mlflow>=2.10" \
+      "optuna>=3.5" gymnasium pandas pyarrow
 
 ENV GYM_DR_IN_CONTAINER=1
 # Modern mlflow (3.x) raises on the './mlruns' file-store backend ("maintenance
