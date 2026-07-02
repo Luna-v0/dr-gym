@@ -95,11 +95,13 @@ def recommend(
 
 def rule_of_thumb(machine: "Mapping[str, Any]") -> "dict[str, Any]":
     """Conservative per-machine defaults WITHOUT a benchmark (clearly labelled
-    ``source="heuristic"``). Feature obs scales with cores (cap 18); camera obs is
-    render-bound and reset-storms past ~4 cars on an 8-core box (D10), so it caps
-    low and prefers a GPU render when there's enough VRAM. Encodes the maintainer's
-    two-machine intent: 8-core+16GB → feature n=6 (CPU) / camera n=2 (GPU);
-    22-core+8GB → feature n=18 (CPU) / camera n=4 (GPU)."""
+    ``source="heuristic"``). Feature obs scales with cores (cap 18). Camera obs is no
+    longer reset-storm-capped: B7 §1.1's batched ``set_pose_vector`` reset fixed the
+    n≥5 storm (n=5 and n=8 camera validated on real sim), so the cap is now render
+    throughput (gz renders cameras single-threaded → RTF drops with N), not
+    stability. Defaults to the maintainer's n≥6 target on an 8-core box; run
+    ``optimized_setup.py --probe`` (B6) for the throughput-optimal. GPU render when
+    there's enough VRAM."""
     cores = int(machine.get("cores", 1))
     vram = float(machine.get("gpu_vram_gib") or 0.0)
     cuda = bool(machine.get("cuda"))
@@ -111,11 +113,13 @@ def rule_of_thumb(machine: "Mapping[str, Any]") -> "dict[str, Any]":
             "source": "heuristic",
         },
         "camera_obs": {
-            "n_cars": 2 if cores <= 8 else 4,  # D10: >4 reset-storms on 8 cores
+            # Storm fixed (B7 §1.1) → n>=6 is viable on 8 cores; capped at 8 by the
+            # racecar_0..7 launch blocks. Higher N = slower render (single OGRE thread).
+            "n_cars": 6 if cores <= 8 else 8,
             "device": "cuda" if gpu_render else "cpu",
             "render": "gpu" if gpu_render else "software",
             "source": "heuristic",
-            "note": "camera n>2 needs the generalised racecar_2..N launch + reset-seam work",
+            "note": "storm fixed by batched reset; cap is render throughput now — probe (B6) for the optimal",
         },
     }
 

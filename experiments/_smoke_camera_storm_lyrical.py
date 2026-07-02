@@ -47,12 +47,13 @@ def main() -> int:
                                 eval_freq=10 ** 9, n_eval_episodes=1),
         use_gpu=True,  # --gpus all for the gz camera render
     )
+    n_cars = int(os.getenv("GYM_DR_STORM_NCARS", "5"))
     result = Study(exp).run()
     if not result.run_paths or result.run_paths[0] is None:
-        print("[smoke-camera-storm] CAMERA STORM SMOKE FAILED (container aborted/killed)",
+        print(f"[smoke-camera-storm] CAMERA STORM SMOKE FAILED at n={n_cars} (container aborted/killed)",
               flush=True)
         return 1
-    print("[smoke-camera-storm] CAMERA STORM SURVIVED — n=5 camera trained without a reset-storm",
+    print(f"[smoke-camera-storm] CAMERA STORM SURVIVED — n={n_cars} camera trained without a reset-storm",
           flush=True)
     return 0
 

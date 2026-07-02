@@ -74,19 +74,20 @@ def test_detect_machine_has_cores():
 
 
 def test_rule_of_thumb_pc1_8core_16gb():
-    # PC1: 8 cores + RTX 4060 Ti 16 GB -> feature n=6 CPU, camera n=2 GPU render.
+    # PC1: 8 cores + RTX 4060 Ti 16 GB -> feature n=6 CPU, camera n=6 GPU render
+    # (storm fixed by B7 §1.1 → the n>=6 target is viable, no longer capped at 2).
     rot = rule_of_thumb({"cores": 8, "cuda": True, "gpu_vram_gib": 16.0})
     assert rot["feature_obs"]["n_cars"] == 6
     assert rot["feature_obs"]["device"] == "cpu"
-    assert rot["camera_obs"]["n_cars"] == 2
+    assert rot["camera_obs"]["n_cars"] == 6
     assert rot["camera_obs"]["render"] == "gpu"
 
 
 def test_rule_of_thumb_pc2_22core_8gb():
-    # PC2: 22 cores + RTX 4070 Laptop 8 GB -> feature n=18, camera n=4 GPU render.
+    # PC2: 22 cores + RTX 4070 Laptop 8 GB -> feature n=18, camera n=8 (launch cap) GPU.
     rot = rule_of_thumb({"cores": 22, "cuda": True, "gpu_vram_gib": 8.0})
     assert rot["feature_obs"]["n_cars"] == 18
-    assert rot["camera_obs"]["n_cars"] == 4
+    assert rot["camera_obs"]["n_cars"] == 8
     assert rot["camera_obs"]["render"] == "gpu"
 
 
